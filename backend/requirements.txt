@@ -1,0 +1,27 @@
+# Web framework
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Configuration & validation
+pydantic
+pydantic-settings
+python-dotenv
+
+# Database
+sqlalchemy
+psycopg2-binary
+alembic
+pgvector
+
+# Document ingestion
+pypdf
+python-docx
+langchain-text-splitters
+
+# LLM provider (used by the retrieval/chat feature; see docs/ROADMAP.md)
+openai
+
+# Testing
+pytest
+httpx

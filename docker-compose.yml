@@ -1,0 +1,29 @@
+# Development database for AI Shadow MVP.
+#
+# Uses the pgvector image rather than stock postgres so that
+# `CREATE EXTENSION vector` in the baseline migration succeeds without any
+# manual extension build — see docs/DECISIONS.md.
+#
+#   docker compose up -d
+#   cd backend && alembic upgrade head
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: aishadow-postgres
+    environment:
+      POSTGRES_USER: aishadow
+      POSTGRES_PASSWORD: aishadow
+      POSTGRES_DB: aishadow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aishadow -d aishadow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
