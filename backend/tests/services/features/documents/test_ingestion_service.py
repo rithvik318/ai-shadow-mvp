@@ -5,14 +5,19 @@ from sqlalchemy.orm import Session
 from app.core.exceptions import (
     DocumentParseError,
     DocumentTooLargeError,
+    EmbeddingError,
     EmptyDocumentError,
     UnsupportedDocumentTypeError,
 )
 from app.models.document import Document, DocumentChunk, DocumentStatus
+from app.services.features.documents.indexing_service import (
+    backfill_missing_embeddings,
+)
 from app.services.features.documents.ingestion_service import (
     ingest_document,
     validate_upload,
 )
+from app.services.llm.embedding_service import embedding_service
 from tests.fixtures.factories import build_markdown, build_pdf, build_text
 
 PDF_TYPE = "application/pdf"
@@ -131,9 +136,13 @@ def test_ingested_chunks_carry_provenance(db_session: Session) -> None:
     assert {chunk.page_number for chunk in chunks} == {1, 2}
 
 
-def test_ingested_chunks_have_no_embedding_yet(db_session: Session) -> None:
-    """The embedding column exists and is left null for the embedding
-    feature to populate without a migration."""
+def test_ingested_chunks_are_embedded(db_session: Session) -> None:
+    """Ingestion stores a vector for every chunk.
+
+    Without this an upload reports `indexed` while remaining invisible to
+    retrieval, which surfaces to the user as "no relevant results" rather than
+    as an error.
+    """
 
     document = ingest_document(
         db_session,
@@ -151,7 +160,25 @@ def test_ingested_chunks_have_no_embedding_yet(db_session: Session) -> None:
     )
 
     assert chunks
-    assert all(chunk.embedding is None for chunk in chunks)
+    assert all(chunk.embedding is not None for chunk in chunks)
+
+
+def test_every_chunk_is_embedded_exactly_once(
+    db_session: Session, fake_embeddings: list[list[str]]
+) -> None:
+    """Chunk text reaches the provider once, batched, not one call per chunk."""
+
+    document = ingest_document(
+        db_session,
+        data=build_markdown([("A", "First body."), ("B", "Second body.")]),
+        filename="notes.md",
+        content_type="text/markdown",
+    )
+
+    embedded_texts = [text for batch in fake_embeddings for text in batch]
+
+    assert len(embedded_texts) == document.chunk_count
+    assert len(set(embedded_texts)) == len(embedded_texts)
 
 
 def test_ingested_rows_are_scoped_to_the_owning_user(db_session: Session) -> None:
@@ -241,6 +268,87 @@ def test_document_with_no_extractable_text_is_recorded_as_failed(
 
     document = db_session.execute(select(Document)).scalars().one()
     assert document.status == DocumentStatus.FAILED
+
+
+def test_embedding_failure_marks_the_document_failed(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A document is not `indexed` until it can actually be retrieved."""
+
+    def failing(texts: list[str]) -> list[list[float]]:
+        raise EmbeddingError("provider down")
+
+    monkeypatch.setattr(embedding_service, "embed_texts", failing)
+
+    with pytest.raises(EmbeddingError):
+        ingest_document(
+            db_session,
+            data=build_text("Some body text."),
+            filename="notes.txt",
+            content_type="text/plain",
+        )
+
+    document = db_session.execute(select(Document)).scalars().one()
+    assert document.status == DocumentStatus.FAILED
+    assert document.error_message
+
+
+def test_embedding_failure_keeps_the_parsed_chunks(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike a parse failure, an embedding failure is transient — keeping the
+    chunks lets the backfill finish without re-parsing the file."""
+
+    def failing(texts: list[str]) -> list[list[float]]:
+        raise EmbeddingError("provider down")
+
+    monkeypatch.setattr(embedding_service, "embed_texts", failing)
+
+    with pytest.raises(EmbeddingError):
+        ingest_document(
+            db_session,
+            data=build_text("Some body text."),
+            filename="notes.txt",
+            content_type="text/plain",
+        )
+
+    chunks = db_session.execute(select(DocumentChunk)).scalars().all()
+    assert chunks
+    assert all(chunk.embedding is None for chunk in chunks)
+    assert all(chunk.content for chunk in chunks)
+
+
+def test_a_failed_embedding_can_be_completed_by_the_backfill(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: a failed upload becomes retrievable once the provider
+    recovers, with no re-upload."""
+
+    original = embedding_service.embed_texts
+
+    def failing(texts: list[str]) -> list[list[float]]:
+        raise EmbeddingError("provider down")
+
+    monkeypatch.setattr(embedding_service, "embed_texts", failing)
+
+    with pytest.raises(EmbeddingError):
+        ingest_document(
+            db_session,
+            data=build_text("Some body text."),
+            filename="notes.txt",
+            content_type="text/plain",
+        )
+
+    monkeypatch.setattr(embedding_service, "embed_texts", original)
+    result = backfill_missing_embeddings(db_session)
+
+    document = db_session.execute(select(Document)).scalars().one()
+    assert result.documents_processed == 1
+    assert document.status == DocumentStatus.INDEXED
+    assert all(
+        chunk.embedding is not None
+        for chunk in db_session.execute(select(DocumentChunk)).scalars().all()
+    )
 
 
 def test_deleting_a_document_cascades_to_its_chunks(db_session: Session) -> None:

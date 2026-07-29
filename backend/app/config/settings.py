@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = 150
 
     EMBEDDING_DIMENSIONS: int = 1536
+    EMBEDDING_MODEL: str = "openai/text-embedding-3-small"
+    # Unset means "use LLM_PROVIDER". Set it only to point embeddings at a
+    # different provider from completions.
+    EMBEDDING_PROVIDER: str | None = None
+    EMBEDDING_BATCH_SIZE: int = 64
 
     LLM_PROVIDER: str = "openrouter"
     LLM_MODEL: str = "openai/gpt-oss-20b"
@@ -35,6 +40,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-print("=" * 80)
-print("DATABASE_URL =", settings.DATABASE_URL)
-print("=" * 80)

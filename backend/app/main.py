@@ -9,6 +9,8 @@ from app.core.exceptions import (
     DocumentNotFoundError,
     DocumentParseError,
     DocumentTooLargeError,
+    EmbeddingDimensionError,
+    EmbeddingError,
     EmptyDocumentError,
     LLMServiceError,
     UnsupportedDocumentTypeError,
@@ -58,11 +60,16 @@ async def handle_document_error(request: Request, exc: DocumentError) -> JSONRes
 async def handle_llm_error(request: Request, exc: LLMServiceError) -> JSONResponse:
     """Map LLM failures to 502 without leaking provider internals."""
 
-    detail = (
-        "The language model returned a malformed response."
-        if isinstance(exc, AnalysisValidationError)
-        else "The language model provider is unavailable."
-    )
+    if isinstance(exc, EmbeddingDimensionError):
+        # A configuration error, not a provider outage — say so, because
+        # "provider unavailable" would send someone debugging the wrong thing.
+        detail = "The embedding model does not match the configured vector width."
+    elif isinstance(exc, EmbeddingError):
+        detail = "The embedding provider is unavailable."
+    elif isinstance(exc, AnalysisValidationError):
+        detail = "The language model returned a malformed response."
+    else:
+        detail = "The language model provider is unavailable."
 
     return JSONResponse(
         status_code=502,

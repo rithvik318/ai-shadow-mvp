@@ -45,7 +45,18 @@ DocumentStatusType = SAEnum(
 # pgvector is the production type. SQLite has no vector type, so the test
 # suite stores the same column as JSON — the column exists in both dialects,
 # which is what lets the embedding feature populate it without a migration.
-EmbeddingType = Vector(settings.EMBEDDING_DIMENSIONS).with_variant(JSON(), "sqlite")
+#
+# `none_as_null=True` is load-bearing. SQLAlchemy's JSON type defaults to
+# persisting a Python None as the JSON encoding of `null` rather than as SQL
+# NULL, and it sets `should_evaluate_none` so an unset attribute is bound too.
+# Under that default, `embedding IS NULL` matches nothing on SQLite while
+# matching correctly against pgvector — so every query that asks "which chunks
+# still need a vector?" silently returns nothing, and the whole embedding
+# pipeline no-ops in tests only. The variant has to agree with production
+# about what "no vector" means, or it is not a stand-in for it.
+EmbeddingType = Vector(settings.EMBEDDING_DIMENSIONS).with_variant(
+    JSON(none_as_null=True), "sqlite"
+)
 
 
 class Document(Base):

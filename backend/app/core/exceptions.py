@@ -29,6 +29,19 @@ class AnalysisValidationError(LLMServiceError):
     expected schema."""
 
 
+class EmbeddingError(LLMServiceError):
+    """Raised when embeddings cannot be generated for one or more texts."""
+
+
+class EmbeddingDimensionError(EmbeddingError):
+    """Raised when the provider returns vectors of an unexpected width.
+
+    Storing these would corrupt the index silently: pgvector rejects the write
+    only if the column width differs, and a model swapped for one of the same
+    width but different semantics would not be caught at all.
+    """
+
+
 # --- Documents -----------------------------------------------------------
 
 

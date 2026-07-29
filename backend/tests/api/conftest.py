@@ -7,8 +7,9 @@ from sqlalchemy.orm import Session
 from app.database.session import get_db
 from app.main import app
 from tests.support.database import db_session  # noqa: F401
+from tests.support.embeddings import fake_embeddings  # noqa: F401
 
-__all__ = ["client", "db_session"]
+__all__ = ["client", "db_session", "fake_embeddings"]
 
 
 @pytest.fixture

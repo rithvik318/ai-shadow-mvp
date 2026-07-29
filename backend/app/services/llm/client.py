@@ -2,11 +2,31 @@ from openai import OpenAI
 
 from app.config.settings import settings
 
-_client: OpenAI | None = None
+# Cached per provider name rather than as a single client, because completions
+# and embeddings may deliberately point at different providers — see
+# `get_embedding_client()`.
+_clients: dict[str, OpenAI] = {}
+
+_BASE_URLS: dict[str, str] = {
+    "openrouter": "https://openrouter.ai/api/v1",
+}
 
 
-def get_llm_client() -> OpenAI:
-    """Return the process-wide LLM client, constructing it on first use.
+def _build_client(provider: str) -> OpenAI:
+    if provider == "openai":
+        return OpenAI(api_key=settings.OPENAI_API_KEY)
+
+    if provider == "openrouter":
+        return OpenAI(
+            api_key=settings.OPENROUTER_API_KEY,
+            base_url=_BASE_URLS["openrouter"],
+        )
+
+    raise ValueError(f"Unsupported LLM provider: {provider}")
+
+
+def get_client(provider: str) -> OpenAI:
+    """Return the cached client for a provider, constructing it on first use.
 
     Construction is deferred rather than done at import time so that importing
     any module in this package does not require live credentials. The reference
@@ -14,28 +34,33 @@ def get_llm_client() -> OpenAI:
     therefore its test suite — unimportable without a populated `.env`.
     """
 
-    global _client
+    normalized = provider.lower()
 
-    if _client is not None:
-        return _client
+    if normalized not in _clients:
+        _clients[normalized] = _build_client(normalized)
 
-    provider = settings.LLM_PROVIDER.lower()
+    return _clients[normalized]
 
-    if provider == "openai":
-        _client = OpenAI(api_key=settings.OPENAI_API_KEY)
-    elif provider == "openrouter":
-        _client = OpenAI(
-            api_key=settings.OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1",
-        )
-    else:
-        raise ValueError(f"Unsupported LLM provider: {provider}")
 
-    return _client
+def get_llm_client() -> OpenAI:
+    """Return the client for chat completions, per `LLM_PROVIDER`."""
+
+    return get_client(settings.LLM_PROVIDER)
+
+
+def get_embedding_client() -> OpenAI:
+    """Return the client for embeddings.
+
+    Falls back to `LLM_PROVIDER` when `EMBEDDING_PROVIDER` is unset, so the
+    common case needs no extra configuration. The override exists because
+    embeddings and completions are not guaranteed to be available from the same
+    provider — see docs/DECISIONS.md.
+    """
+
+    return get_client(settings.EMBEDDING_PROVIDER or settings.LLM_PROVIDER)
 
 
 def reset_llm_client() -> None:
-    """Discard the cached client. Intended for tests that swap providers."""
+    """Discard every cached client. Intended for tests that swap providers."""
 
-    global _client
-    _client = None
+    _clients.clear()

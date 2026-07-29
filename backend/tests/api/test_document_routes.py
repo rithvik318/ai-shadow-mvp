@@ -4,7 +4,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.exceptions import EmbeddingError
 from app.models.document import DocumentChunk, DocumentStatus
+from app.services.llm.embedding_service import embedding_service
 from tests.fixtures.factories import build_docx, build_markdown, build_pdf
 
 PDF_TYPE = "application/pdf"
@@ -113,6 +115,39 @@ def test_upload_without_a_file_returns_422(client: TestClient) -> None:
     """FastAPI's own request validation rejects a missing file part."""
 
     assert client.post("/documents/upload").status_code == 422
+
+
+def test_upload_returns_502_when_the_embedding_provider_fails(
+    client: TestClient, monkeypatch
+) -> None:
+    """A provider outage is an upstream failure, not the client's fault."""
+
+    def failing(texts: list[str]) -> list[list[float]]:
+        raise EmbeddingError("provider down")
+
+    monkeypatch.setattr(embedding_service, "embed_texts", failing)
+
+    response = _upload(client, b"Some plain text body.", "notes.txt", "text/plain")
+
+    assert response.status_code == 502
+    assert response.json()["error"] == "EmbeddingError"
+
+
+def test_a_document_that_failed_to_embed_is_visible_as_failed(
+    client: TestClient, monkeypatch
+) -> None:
+    """The user can see why, rather than the upload vanishing."""
+
+    def failing(texts: list[str]) -> list[list[float]]:
+        raise EmbeddingError("provider down")
+
+    monkeypatch.setattr(embedding_service, "embed_texts", failing)
+    _upload(client, b"Some plain text body.", "notes.txt", "text/plain")
+
+    failed = client.get("/documents", params={"status": "failed"}).json()
+
+    assert failed["total"] == 1
+    assert failed["items"][0]["error_message"]
 
 
 # --- GET /documents ------------------------------------------------------

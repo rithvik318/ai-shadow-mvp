@@ -5,6 +5,8 @@ simple and the failure modes visible; moving it to a background worker is
 tracked in docs/KNOWN_ISSUES.md.
 """
 
+import logging
+
 from sqlalchemy.orm import Session
 
 from app.config.settings import settings
@@ -12,14 +14,18 @@ from app.core.constants import MVP_USER_ID
 from app.core.exceptions import (
     DocumentError,
     DocumentTooLargeError,
+    EmbeddingError,
     EmptyDocumentError,
 )
 from app.models.document import Document, DocumentChunk, DocumentStatus
 from app.services.features.documents.chunker_service import chunk_document
+from app.services.features.documents.indexing_service import embed_document_chunks
 from app.services.features.documents.parser_service import (
     parse_document,
     resolve_format,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def validate_upload(data: bytes, filename: str, content_type: str | None) -> None:
@@ -59,6 +65,13 @@ def ingest_document(
     failures mark the document `failed` with its error recorded, commit that
     state, and re-raise — so a failed ingest is visible through the API rather
     than silently absent.
+
+    Embedding failures are treated the same way, with one difference: the
+    parsed chunks are kept. A document is only `indexed` once its chunks carry
+    vectors, because a document without them is invisible to retrieval, and
+    reporting it as indexed would make that look like "no relevant results".
+    Keeping the chunks lets `backfill_missing_embeddings` finish the job later
+    without re-parsing the file.
     """
 
     validate_upload(data, filename, content_type)
@@ -99,9 +112,30 @@ def ingest_document(
 
     document.page_count = parsed.page_count
     document.chunk_count = len(chunks)
+    db.flush()
+
+    try:
+        embed_document_chunks(db, document.id, user_id=user_id)
+    except EmbeddingError as exc:
+        document.status = DocumentStatus.FAILED
+        document.error_message = str(exc)
+        db.commit()
+        db.refresh(document)
+        raise
+
     document.status = DocumentStatus.INDEXED
 
     db.commit()
     db.refresh(document)
+
+    logger.info(
+        "document_ingested",
+        extra={
+            "document_id": str(document.id),
+            "chunk_count": document.chunk_count,
+            "page_count": document.page_count,
+            "file_size_bytes": document.file_size_bytes,
+        },
+    )
 
     return document
