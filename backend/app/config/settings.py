@@ -35,3 +35,6 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+print("=" * 80)
+print("DATABASE_URL =", settings.DATABASE_URL)
+print("=" * 80)
