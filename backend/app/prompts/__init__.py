@@ -1,11 +1,11 @@
 from app.prompts.registry import PromptRegistry
-from app.prompts.system import AI_SHADOW_PROMPT, ASSISTANT_PROMPT
+from app.prompts.system import ASSISTANT_PROMPT, RAG_ANSWER_PROMPT
 
 
 def register_default_prompts() -> None:
     """Register built-in prompt templates if they are not already registered."""
 
-    default_prompts = (ASSISTANT_PROMPT, AI_SHADOW_PROMPT)
+    default_prompts = (ASSISTANT_PROMPT, RAG_ANSWER_PROMPT)
 
     for prompt in default_prompts:
         if not PromptRegistry.exists(prompt.name):

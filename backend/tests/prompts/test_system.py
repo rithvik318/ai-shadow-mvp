@@ -6,7 +6,7 @@ from app.prompts.base import PromptTemplate
 from app.prompts.builder import PromptBuilder
 from app.prompts.registry import PromptRegistry
 
-EXPECTED_PROMPT_NAMES = ["ai_shadow", "assistant"]
+EXPECTED_PROMPT_NAMES = ["assistant", "rag_answer"]
 
 
 @pytest.mark.parametrize("export_name", system_prompts.__all__)
@@ -47,20 +47,34 @@ def test_register_default_prompts_is_idempotent() -> None:
     assert PromptRegistry.list() == EXPECTED_PROMPT_NAMES
 
 
-def test_ai_shadow_prompt_renders_context_and_input() -> None:
+def test_rag_answer_prompt_renders_context_and_question() -> None:
     """The retrieval prompt accepts retrieved context and a question."""
 
     register_default_prompts()
 
     messages = PromptBuilder.build(
-        PromptRegistry.get("ai_shadow"),
+        PromptRegistry.get("rag_answer"),
         context="Knowledge Base",
-        input="What should I do?",
+        question="What should I do?",
     )
 
     assert len(messages) == 2
     assert "Knowledge Base" in messages[1]["content"]
     assert "What should I do?" in messages[1]["content"]
+
+
+def test_rag_answer_prompt_forbids_answering_outside_the_context() -> None:
+    """The grounding rules are the feature, not decoration — if they are
+    softened, the model starts answering from prior knowledge and the
+    citations stop meaning anything."""
+
+    # Read from the module, not the registry: this asserts what the template
+    # says, which is true whether or not anything has registered it.
+    system = system_prompts.RAG_ANSWER_PROMPT.system_prompt.lower()
+
+    assert "only source of truth" in system
+    assert "never introduce" in system
+    assert "say so plainly" in system
 
 
 def test_assistant_prompt_renders_input() -> None:
