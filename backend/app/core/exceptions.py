@@ -67,3 +67,18 @@ class DocumentParseError(DocumentError):
 
 class DocumentNotFoundError(DocumentError):
     """Raised when a requested document does not exist for this user."""
+
+
+# --- Retrieval -----------------------------------------------------------
+
+
+class RetrievalError(AIShadowError):
+    """Base class for search failures caused by the caller's request.
+
+    Distinct from `LLMServiceError`: a bad `top_k` is the client's mistake,
+    while a provider outage is not, and the two must not share a status code.
+    """
+
+
+class EmptyQueryError(RetrievalError):
+    """Raised when a search query is blank."""

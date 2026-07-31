@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     EMBEDDING_PROVIDER: str | None = None
     EMBEDDING_BATCH_SIZE: int = 64
 
+    # How many chunks a search returns, and the cosine-similarity floor a chunk
+    # must clear. The floor defaults to 0.0 — orthogonal or better — because a
+    # useful value can only be chosen against real documents; see docs/ROADMAP.md.
+    # Set to None (an empty value in .env) to disable filtering entirely.
+    RETRIEVAL_TOP_K: int = 5
+    RETRIEVAL_SIMILARITY_THRESHOLD: float | None = 0.0
+
     LLM_PROVIDER: str = "openrouter"
     LLM_MODEL: str = "openai/gpt-oss-20b"
     OPENAI_API_KEY: str | None = None

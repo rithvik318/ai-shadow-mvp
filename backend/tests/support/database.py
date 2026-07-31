@@ -10,6 +10,8 @@ present. The `embedding` column is declared with a JSON variant for SQLite
 production keeps the real pgvector type.
 """
 
+import json
+import math
 from collections.abc import Iterator
 
 import pytest
@@ -19,6 +21,39 @@ from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401  (registers the tables on Base.metadata)
 from app.database.base import Base
+
+
+def sqlite_cosine_distance(left: str | None, right: str | None) -> float | None:
+    """SQLite stand-in for pgvector's `<=>` operator.
+
+    Registered as a SQL function so `app/database/vector.py` compiles to a real
+    call here, and the ordering, threshold and limiting logic under test is the
+    same logic production runs — rather than a Python reimplementation that
+    could drift from it.
+
+    Returns NULL where pgvector's schema would have refused the row outright: a
+    vector of the wrong width, or one of zero length whose direction is
+    undefined. `retrieval_service` filters those out explicitly, because SQLite
+    and Postgres sort NULLs to opposite ends.
+    """
+
+    if left is None or right is None:
+        return None
+
+    a = json.loads(left)
+    b = json.loads(right)
+
+    if not a or len(a) != len(b):
+        return None
+
+    norm_a = math.sqrt(sum(value * value for value in a))
+    norm_b = math.sqrt(sum(value * value for value in b))
+
+    if norm_a == 0.0 or norm_b == 0.0:
+        return None
+
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    return 1.0 - (dot / (norm_a * norm_b))
 
 
 @pytest.fixture
@@ -38,6 +73,8 @@ def db_session() -> Iterator[Session]:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
+
+        dbapi_connection.create_function("cosine_distance", 2, sqlite_cosine_distance)
 
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine, autoflush=False, autocommit=False)()
