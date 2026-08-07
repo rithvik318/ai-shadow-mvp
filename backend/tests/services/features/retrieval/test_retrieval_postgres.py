@@ -82,8 +82,34 @@ def pg_session() -> Iterator[Session]:
 
         schema = f"retrieval_test_{uuid.uuid4().hex[:8]}"
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        # `public` stays on the path because the `vector` type and the `<=>`
+        # operator live there, with the temporary schema ahead of it so
+        # unqualified names resolve to this test's own tables.
         connection.execute(text(f'SET search_path TO "{schema}", public'))
-        Base.metadata.create_all(bind=connection)
+
+        # `checkfirst=False` is load-bearing. The default asks Postgres whether
+        # a table named `documents` already exists, and that question is
+        # answered against the whole search_path — so once the development
+        # database has been migrated, `public.documents` answers yes and
+        # `create_all` creates nothing here. The tables would then be missing
+        # from the temporary schema, every unqualified query would fall through
+        # to `public`, and the tests would silently read and write the real
+        # corpus instead of their own fixtures.
+        Base.metadata.create_all(bind=connection, checkfirst=False)
+
+        # Fails loudly if that ever stops holding: a test that quietly reads
+        # production is worse than one that does not run at all.
+        resolved = connection.execute(
+            text(
+                "SELECT n.nspname FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.relname = 'document_chunks' AND pg_table_is_visible(c.oid)"
+            )
+        ).scalar_one()
+        assert resolved == schema, (
+            f"unqualified 'document_chunks' resolves to {resolved!r}, not the "
+            f"test schema {schema!r} — this run would query real data"
+        )
 
         # The session joins the transaction above via a SAVEPOINT rather than
         # owning it, so a `commit()` inside a test releases the savepoint and
