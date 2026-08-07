@@ -195,7 +195,7 @@ def test_a_passage_without_a_page_falls_back_to_its_heading(
         page_number=None,
         section_title="Leave",
     )
-
+    answer_question(db_session, "q?")
     assert "[1] policy.docx, section 'Leave'" in calls[0][1]["content"]
 
 
@@ -223,7 +223,8 @@ def test_no_retrieved_chunks_answers_honestly(
     fake_llm("should not be used")
     _seed(db_session, [("unrelated", NORTH)])
 
-    result = answer_question(db_session, "q?", top_k=5, similarity_threshold=0.99)
+    result = answer_question(db_session, "q?", top_k=5,
+                             similarity_threshold=0.99)
 
     assert result.answer == NO_CONTEXT_ANSWER
     assert result.sources == []
