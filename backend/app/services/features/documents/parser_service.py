@@ -6,6 +6,7 @@ live — independently testable.
 """
 
 import io
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,8 @@ from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from app.core.constants import SUPPORTED_CONTENT_TYPES, SUPPORTED_EXTENSIONS
 from app.core.exceptions import (
@@ -24,6 +27,8 @@ from app.core.exceptions import (
     EmptyDocumentError,
     UnsupportedDocumentTypeError,
 )
+
+logger = logging.getLogger(__name__)
 
 _MARKDOWN_HEADING = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>.+?)\s*#*$")
 _TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
@@ -81,7 +86,7 @@ def resolve_format(filename: str, content_type: str | None) -> str:
 
     raise UnsupportedDocumentTypeError(
         f"Unsupported document type: {content_type or extension or 'unknown'}. "
-        f"Supported formats are PDF, DOCX, TXT and Markdown."
+        f"Supported formats are PDF, DOCX, PPTX, TXT and Markdown."
     )
 
 
@@ -219,8 +224,8 @@ def _table_rows(table: Table) -> list[list[str]]:
     return rows
 
 
-def _serialise_table(table: Table) -> str:
-    """Render a table as one `Header: value` line per row.
+def _serialise_rows(rows: list[list[str]]) -> str:
+    """Render already-extracted table rows as one `Header: value` line per row.
 
     Chosen over a Markdown grid because a chunk boundary can fall anywhere:
     a grid row separated from its header line becomes unreadable, whereas a
@@ -230,16 +235,13 @@ def _serialise_table(table: Table) -> str:
 
     Tables with no usable header — a single row, a single column, or a first
     row that does not look like labels — fall back to plain delimited rows,
-    which is the right shape for the layout tables DOCX authors use for
-    formatting rather than data.
-    """
+    which is the right shape for the layout tables authors use for formatting
+    rather than data.
 
-    try:
-        rows = _table_rows(table)
-    except Exception:
-        # Malformed grids (bad gridSpan, truncated rows) should cost their
-        # own content, not the whole document.
-        return ""
+    Takes rows rather than a table object so DOCX and PPTX tables reach the
+    reader in one format. Only the extraction of cell text differs between
+    them; how a table reads should not.
+    """
 
     if not rows:
         return ""
@@ -267,6 +269,19 @@ def _serialise_table(table: Table) -> str:
 
     # A header with no data rows beneath it is still worth keeping.
     return "\n".join(lines) if lines else " | ".join(labels)
+
+
+def _serialise_table(table: Table) -> str:
+    """Render one DOCX table."""
+
+    try:
+        rows = _table_rows(table)
+    except Exception:
+        # Malformed grids (bad gridSpan, truncated rows) should cost their
+        # own content, not the whole document.
+        return ""
+
+    return _serialise_rows(rows)
 
 
 def _parse_docx(data: bytes) -> ParsedDocument:
@@ -325,6 +340,197 @@ def _parse_docx(data: bytes) -> ParsedDocument:
     return ParsedDocument(sections=sections, page_count=None)
 
 
+# Sorts a shape whose position cannot be resolved to the end of the slide,
+# where the stable sort leaves it in the order PowerPoint stored it.
+_UNPOSITIONED = float("inf")
+
+
+def _shape_position(shape) -> tuple[float, float]:
+    """Top-left of a shape in EMU, for reading-order sorting."""
+
+    try:
+        top, left = shape.top, shape.left
+    except Exception:
+        return (_UNPOSITIONED, _UNPOSITIONED)
+
+    return (
+        _UNPOSITIONED if top is None else float(top),
+        _UNPOSITIONED if left is None else float(left),
+    )
+
+
+def _ordered_shapes(shapes) -> list:
+    """Return shapes in reading order: top to bottom, then left to right.
+
+    A shape collection iterates in z-order — the order shapes were added to
+    the slide, which has no relation to where they sit on it. A caption added
+    last can be the topmost thing on the page. Sorting by position recovers the
+    order a reader would use. The sort is stable, so shapes at the same
+    position, and any whose position cannot be resolved, keep z-order rather
+    than being reordered arbitrarily between runs.
+    """
+
+    return sorted(shapes, key=_shape_position)
+
+
+def _pptx_table_rows(table) -> list[list[str]]:
+    """Return non-empty rows as lists of cell text, merged cells collapsed.
+
+    A merged region reports its text on the origin cell and reports every cell
+    it spans as `is_spanned`, so skipping those emits the value once instead of
+    once per covered column.
+    """
+
+    rows: list[list[str]] = []
+
+    for row in table.rows:
+        cells = [
+            " ".join(cell.text.split()) for cell in row.cells if not cell.is_spanned
+        ]
+
+        if any(cells):
+            rows.append(cells)
+
+    return rows
+
+
+def _shape_text(shape) -> str:
+    """Return the text of one shape, blank paragraphs dropped."""
+
+    if not shape.has_text_frame:
+        return ""
+
+    lines = [
+        line
+        for paragraph in shape.text_frame.paragraphs
+        if (line := paragraph.text.strip())
+    ]
+
+    return "\n".join(lines)
+
+
+def _shape_blocks(shape) -> list[str]:
+    """Return the text blocks one shape contributes, recursing into groups.
+
+    Pictures, connectors and other shapes with neither a text frame nor a table
+    contribute nothing, which is what keeps decorative furniture out of the
+    extracted text without needing to enumerate the decorative types.
+    """
+
+    if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+        return [
+            block
+            for child in _ordered_shapes(shape.shapes)
+            for block in _shape_blocks(child)
+        ]
+
+    if shape.has_table:
+        return (
+            [serialised]
+            if (serialised := _serialise_rows(_pptx_table_rows(shape.table)))
+            else []
+        )
+
+    return [text] if (text := _shape_text(shape)) else []
+
+
+def _slide_notes(slide) -> str:
+    """Return the speaker notes for a slide, or empty when it has none.
+
+    Guarded by `has_notes_slide` because reading `notes_slide` creates one as a
+    side effect. The notes slide also carries a thumbnail placeholder, so the
+    text frame is addressed directly rather than walked as shapes.
+    """
+
+    if not slide.has_notes_slide:
+        return ""
+
+    frame = slide.notes_slide.notes_text_frame
+
+    if frame is None:
+        return ""
+
+    return "\n".join(
+        line for paragraph in frame.paragraphs if (line := paragraph.text.strip())
+    )
+
+
+def _slide_blocks(slide) -> tuple[str | None, list[str]]:
+    """Return one slide's title and its text blocks, in reading order."""
+
+    title_shape = slide.shapes.title
+    title = " ".join(_shape_text(title_shape).split()) if title_shape else ""
+
+    # Compared by id, not by identity: `python-pptx` builds a fresh proxy
+    # object on every access, so `shapes.title` is never the same object as the
+    # matching shape from iterating `shapes`, and an identity test would emit
+    # the title twice.
+    title_id = title_shape.shape_id if title_shape else None
+
+    blocks: list[str] = []
+
+    # The title leads regardless of geometry, and is repeated into the text
+    # rather than only becoming `section_title`. A DOCX heading introduces the
+    # sections that follow it, but a slide title is part of the one section the
+    # slide becomes — and on a section-divider slide it is the only content
+    # there is, so dropping it would lose the slide entirely.
+    if title:
+        blocks.append(title)
+
+    for shape in _ordered_shapes(
+        shape for shape in slide.shapes if shape.shape_id != title_id
+    ):
+        blocks.extend(_shape_blocks(shape))
+
+    # Last, and labelled: notes are what the presenter said rather than what
+    # the audience saw, and a reader of the retrieved context should be able to
+    # tell the difference.
+    if notes := _slide_notes(slide):
+        blocks.append(f"Speaker notes: {notes}")
+
+    return (title or None), blocks
+
+
+def _parse_pptx(data: bytes) -> ParsedDocument:
+    """Extract one section per slide, in slide order.
+
+    `page_number` carries the 1-indexed slide ordinal — the same field PDF uses
+    for its page, since both answer "where in the file did this come from".
+    Citations therefore say "page 7" for slide 7 until the metadata work in
+    docs/ROADMAP.md gives the locator a name.
+
+    A slide that cannot be read is skipped with a warning rather than failing
+    the presentation: one malformed shape tree should not cost the other
+    ninety-nine slides.
+    """
+
+    try:
+        presentation = Presentation(io.BytesIO(data))
+        slides = list(presentation.slides)
+    except Exception as exc:
+        raise DocumentParseError(f"PPTX could not be read: {exc}") from exc
+
+    sections: list[ParsedSection] = []
+
+    for number, slide in enumerate(slides, start=1):
+        try:
+            title, blocks = _slide_blocks(slide)
+        except Exception:
+            logger.warning(
+                "pptx_slide_skipped",
+                extra={"slide_number": number, "slide_count": len(slides)},
+                exc_info=True,
+            )
+            continue
+
+        if text := "\n".join(blocks).strip():
+            sections.append(
+                ParsedSection(text=text, page_number=number, section_title=title)
+            )
+
+    return ParsedDocument(sections=sections, page_count=len(slides))
+
+
 def _parse_markdown(data: bytes) -> ParsedDocument:
     """Split Markdown on ATX headings so each section keeps its title."""
 
@@ -361,6 +567,7 @@ def _parse_text(data: bytes) -> ParsedDocument:
 _PARSERS = {
     "pdf": _parse_pdf,
     "docx": _parse_docx,
+    "pptx": _parse_pptx,
     "md": _parse_markdown,
     "txt": _parse_text,
 }

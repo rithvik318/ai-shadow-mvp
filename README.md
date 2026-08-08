@@ -4,7 +4,7 @@ Upload documents, index them, and — once retrieval lands — chat with them an
 
 This repository is the focused MVP build. It reuses the components from the original `ai-shadow` prototype that earn their place (LLM provider abstraction, prompt system, Analysis Engine, configuration and testing patterns) and leaves behind the parts that were designed but not needed: the orchestrator, memory system, research and calendar tools, and a set of empty service stubs.
 
-**Currently implemented: document upload and ingestion.** See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next.
+**The pipeline is complete end to end: upload → index → embed → retrieve → answer.** Chat is stateless; conversation memory is not built. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 
@@ -26,29 +26,46 @@ cp ../.env.example .env            # defaults match docker-compose
 # 4. Create the schema
 alembic upgrade head
 
-# 5. Run
+# 5. Confirm the embedding provider actually serves embeddings
+python -m scripts.verify_embedding_provider
+
+# 6. Run
 uvicorn app.main:app --reload
 ```
+
+Step 5 makes one live call and prints the returned vector width. If it fails, set `EMBEDDING_PROVIDER=openai` and `EMBEDDING_MODEL=text-embedding-3-small` in `.env` — no code change is needed.
 
 Interactive API documentation is served at `http://localhost:8000/docs`.
 
 Run the tests with `pytest` from the `backend/` directory. The suite uses an in-memory SQLite database and needs no running services or API credentials.
+
+A handful of retrieval tests run the search query against real pgvector to confirm the SQLite stand-in agrees with it. They are skipped unless a database is reachable; to include them, bring up `docker compose`, run `alembic upgrade head`, then `pytest -m postgres`. They work inside a rolled-back transaction and leave nothing behind.
 
 ---
 
 ## What ingestion does
 
 ```
-Upload  →  Validate  →  Extract text  →  Chunk  →  Persist
-           size            PDF: per page   configurable   documents
-           type            DOCX: headings  size and       document_chunks
-           emptiness       MD: headings    overlap        (embedding column
-                           TXT: whole                      left null)
+Upload  →  Validate  →  Extract text  →  Chunk  →  Embed  →  Persist
+           size            PDF: per page   configurable  batched    documents
+           type            DOCX: headings  size and      provider   document_chunks
+           emptiness       MD: headings    overlap       calls      + vectors
+                           TXT: whole
 ```
 
 Chunks are stored with the page number and section heading they came from, which is what makes a citation resolvable back to a specific place in a specific document later.
 
-The `document_chunks.embedding` column already exists as a nullable `vector(1536)`, with its HNSW index in place. The embedding feature fills it in; no migration is needed at that point.
+A document reaches `status="indexed"` only once every chunk carries a vector. That matters because a document without vectors is invisible to similarity search, and would otherwise surface to the user as "nothing relevant found" rather than as a failure.
+
+### Documents that need embedding
+
+Documents ingested before embedding existed, and uploads whose embedding call failed, have chunks but no vectors:
+
+```bash
+cd backend && python -m scripts.backfill_embeddings
+```
+
+Safe to re-run — chunks that already have a vector are skipped.
 
 ---
 
@@ -88,8 +105,11 @@ curl -X POST http://localhost:8000/documents/upload \
 | `413` | File exceeds `MAX_UPLOAD_SIZE_BYTES` |
 | `415` | Unsupported format |
 | `422` | Empty file, no extractable text, unreadable file, or no `file` part |
+| `502` | The embedding provider failed or returned the wrong vector width |
 
 A file that passes validation but fails to parse is stored with `status: "failed"` and an `error_message`, and returns `422`. A file rejected by validation is not stored at all.
+
+A file that parses but cannot be embedded is also stored as `failed` — but its chunks are kept, so `scripts/backfill_embeddings.py` can finish the job once the provider recovers, without a re-upload.
 
 ### `GET /documents`
 
@@ -114,6 +134,41 @@ Return one document by UUID, including `error_message` when ingestion failed. Re
 ### `DELETE /documents/{id}`
 
 Delete a document and, by cascade, all of its chunks. Returns `204`, or `404` if unknown.
+
+### `POST /chat`
+
+Answer a question using only your indexed documents. Stateless — no conversation history is kept.
+
+```bash
+curl -X POST http://localhost:8000/chat \
+     -H "Content-Type: application/json" \
+     -d '{"question": "How does holiday accrue?", "top_k": 5}'
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `question` | string, 1–4000 chars | Required; must not be blank |
+| `top_k` | integer, 1–50 | Optional; defaults to `RETRIEVAL_TOP_K` |
+
+```json
+{
+  "answer": "Holiday accrues at two days per month, pro-rated for part-time staff.",
+  "sources": [
+    { "document_id": "9f1c2b6e-...", "filename": "handbook.pdf", "page_number": 12, "similarity": 0.91 }
+  ],
+  "retrieved_chunks": 3
+}
+```
+
+`sources` are the passages actually put in front of the model, so they cannot be invented — the model has no way to name a document that was not retrieved. The trade-off is that every retrieved passage is listed, including any the answer did not draw on.
+
+When nothing relevant is found the endpoint returns `200` with `retrieved_chunks: 0`, an empty `sources`, and an answer saying so — and no model call is made. Check `retrieved_chunks`, not the prose, to tell that apart from a grounded answer.
+
+| Status | When |
+|---|---|
+| `200` | Answered, or nothing relevant found |
+| `422` | Blank question, or `top_k` out of range |
+| `502` | The embedding or language model provider failed |
 
 ### `GET /health`, `GET /`
 
@@ -140,7 +195,12 @@ Set in `backend/.env`; see [`.env.example`](.env.example) for the full list with
 | `CHUNK_SIZE` | `1000` | Target characters per chunk |
 | `CHUNK_OVERLAP` | `150` | Characters shared between neighbouring chunks |
 | `EMBEDDING_DIMENSIONS` | `1536` | Width of the embedding column |
-| `LLM_PROVIDER`, `LLM_MODEL` | `openrouter`, `openai/gpt-oss-20b` | Not used by ingestion |
+| `EMBEDDING_MODEL` | `openai/text-embedding-3-small` | Must return `EMBEDDING_DIMENSIONS`-wide vectors |
+| `EMBEDDING_PROVIDER` | unset | Unset means "same as `LLM_PROVIDER`". Set to `openai` to route embeddings there only |
+| `EMBEDDING_BATCH_SIZE` | `64` | Texts per provider call |
+| `RETRIEVAL_TOP_K` | `5` | Chunks returned per search |
+| `RETRIEVAL_SIMILARITY_THRESHOLD` | `0.0` | Cosine-similarity floor in `[-1, 1]`; leave empty to disable. Needs tuning on real documents |
+| `LLM_PROVIDER`, `LLM_MODEL` | `openrouter`, `openai/gpt-oss-20b` | Completions only; not used by ingestion |
 
 Every setting has a working default, so the application and its tests import without a `.env` present.
 
@@ -153,14 +213,16 @@ backend/app/
 ├── api/            FastAPI routes
 ├── config/         Pydantic settings
 ├── core/           exception hierarchy, shared constants
-├── database/       engine, session factory, FastAPI dependency
+├── database/       engine, session factory, dependency, vector distance
 ├── models/         SQLAlchemy models
 ├── prompts/        prompt templates, registry, builder
 ├── schemas/        Pydantic request/response models
 └── services/
     ├── engines/    reusable, domain-agnostic AI capabilities
-    ├── features/   product features (documents/)
-    └── llm/        provider abstraction
+    ├── features/   product features (documents/, retrieval/)
+    └── llm/        provider abstraction and embeddings
+
+backend/scripts/    operational entrypoints (verification, backfill)
 ```
 
 ---

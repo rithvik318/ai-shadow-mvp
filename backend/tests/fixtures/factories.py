@@ -10,6 +10,8 @@ import io
 import docx
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
+from pptx import Presentation
+from pptx.util import Inches
 
 # `python-docx` registers neither prefix, so both are declared by hand.
 _MC_NS = 'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
@@ -83,6 +85,93 @@ def build_docx(sections: list[tuple[str, str]]) -> bytes:
 
     buffer = io.BytesIO()
     document.save(buffer)
+    return buffer.getvalue()
+
+
+def build_pptx(slides: list[dict]) -> bytes:
+    """Return a PPTX assembled from slide specifications.
+
+    Each slide is a dict, every key optional:
+
+        title  str                     the title placeholder
+        body   str                     the content placeholder, newline-split
+        boxes  list[(inches, str)]     free text boxes, at the given top offset
+        group  list[(inches, str)]     text boxes inside one grouped shape
+        table  list[list[str]]         a table, first row treated as a header
+        notes  str                     speaker notes
+        hidden bool                    marks the slide `show="0"`
+
+    `boxes` and `group` take an explicit vertical offset so a test can add
+    shapes in an order that disagrees with their position on the slide, which
+    is the only way to prove the parser sorts by geometry rather than by the
+    z-order `python-pptx` iterates in.
+    """
+
+    presentation = Presentation()
+    blank = presentation.slide_layouts[6]
+    titled = presentation.slide_layouts[1]
+
+    for spec in slides:
+        wants_placeholder = "title" in spec or "body" in spec
+        slide = presentation.slides.add_slide(titled if wants_placeholder else blank)
+
+        if wants_placeholder:
+            slide.shapes.title.text = spec.get("title", "")
+            slide.placeholders[1].text = spec.get("body", "")
+
+        for top, text in spec.get("boxes", []):
+            box = slide.shapes.add_textbox(
+                Inches(1), Inches(top), Inches(4), Inches(0.8)
+            )
+            box.text_frame.text = text
+
+        if group := spec.get("group"):
+            shape = slide.shapes.add_group_shape()
+            for top, text in group:
+                child = shape.shapes.add_textbox(
+                    Inches(1), Inches(top), Inches(3), Inches(0.8)
+                )
+                child.text_frame.text = text
+
+        if grid := spec.get("table"):
+            frame = slide.shapes.add_table(
+                len(grid), len(grid[0]), Inches(1), Inches(6), Inches(6), Inches(1)
+            )
+            for r, row in enumerate(grid):
+                for c, value in enumerate(row):
+                    frame.table.cell(r, c).text = value
+
+        if notes := spec.get("notes"):
+            slide.notes_slide.notes_text_frame.text = notes
+
+        if spec.get("hidden"):
+            # `python-pptx` has no API for slide visibility; `show="0"` is the
+            # attribute PowerPoint writes when a slide is hidden.
+            slide._element.set("show", "0")
+
+    buffer = io.BytesIO()
+    presentation.save(buffer)
+    return buffer.getvalue()
+
+
+def build_pptx_merged_table(grid: list[list[str]]) -> bytes:
+    """Return a one-slide PPTX whose table has its first two header cells merged."""
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    frame = slide.shapes.add_table(
+        len(grid), len(grid[0]), Inches(1), Inches(1), Inches(6), Inches(1)
+    )
+    table = frame.table
+
+    for r, row in enumerate(grid):
+        for c, value in enumerate(row):
+            table.cell(r, c).text = value
+
+    table.cell(0, 0).merge(table.cell(0, 1))
+
+    buffer = io.BytesIO()
+    presentation.save(buffer)
     return buffer.getvalue()
 
 

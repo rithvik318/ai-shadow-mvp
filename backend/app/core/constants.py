@@ -7,6 +7,9 @@ MVP_USER_ID = "mvp-user"
 SUPPORTED_CONTENT_TYPES: dict[str, str] = {
     "application/pdf": "pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": (
+        "pptx"
+    ),
     "text/plain": "txt",
     "text/markdown": "md",
     "text/x-markdown": "md",
@@ -15,6 +18,7 @@ SUPPORTED_CONTENT_TYPES: dict[str, str] = {
 SUPPORTED_EXTENSIONS: dict[str, str] = {
     ".pdf": "pdf",
     ".docx": "docx",
+    ".pptx": "pptx",
     ".txt": "txt",
     ".md": "md",
     ".markdown": "md",
