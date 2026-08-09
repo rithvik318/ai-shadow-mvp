@@ -41,6 +41,19 @@ _TEXT_TAG = qn("w:t")
 # Markup Compatibility, which `python-docx` does not register a prefix for.
 _FALLBACK_TAG = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
 
+# Subtrees whose text a paragraph must not claim. Text boxes and nested tables
+# are emitted by their own handlers, so taking them here as well would repeat
+# them; a deletion is not content.
+_NOT_PARAGRAPH_TEXT = frozenset(
+    {_TEXT_BOX_TAG, _FALLBACK_TAG, qn("w:tbl"), qn("w:del")}
+)
+
+_RUN_TAG = qn("w:r")
+
+# What a run's non-text children stand for, matching `Run.text`. Without these
+# a tab between two words closes up and welds them into one token.
+_RUN_SEPARATORS = {qn("w:tab"): "\t", qn("w:br"): "\n", qn("w:cr"): "\n"}
+
 
 @dataclass(frozen=True)
 class ParsedSection:
@@ -181,6 +194,51 @@ def _text_box_blocks(element) -> list[str]:
     return blocks
 
 
+def _paragraph_text(paragraph: Paragraph) -> str:
+    """Return a paragraph's text, including runs Word nests inside wrappers.
+
+    `Paragraph.text` concatenates the paragraph's direct `w:r` children (and,
+    since python-docx 1.1, its hyperlinks). A run wrapped in anything else is
+    invisible to it: a tracked insertion (`w:ins`), a field result
+    (`w:fldSimple`), a smart tag, a content control. In the SunRadia corpus
+    that hid the whole body of a document whose changes were never accepted —
+    570 paragraphs, of which `Paragraph.text` saw 17 — and the parse still
+    reported success, so the document indexed as an empty shell.
+
+    Reading `w:t` descendants instead catches every such wrapper without
+    enumerating them, which matters because the list is open-ended. Deleted
+    text is excluded for free: Word stores it as `w:delText`, a different tag.
+    """
+
+    element = paragraph._p
+    parts: list[str] = []
+
+    for node in element.iter():
+        if node.tag == _TEXT_TAG:
+            value = node.text or ""
+        elif node.tag in _RUN_SEPARATORS and node.getparent().tag == _RUN_TAG:
+            # Only inside a run: `w:tab` also appears in `w:pPr` as a tab-stop
+            # definition, which is layout rather than content.
+            value = _RUN_SEPARATORS[node.tag]
+        else:
+            continue
+
+        ancestor = node.getparent()
+
+        while ancestor is not None and ancestor is not element:
+            if ancestor.tag in _NOT_PARAGRAPH_TEXT:
+                break
+
+            ancestor = ancestor.getparent()
+        else:
+            parts.append(value)
+
+    # Joined without a separator, exactly as `Paragraph.text` joins runs: Word
+    # splits a single word across runs freely, so anything else inserts breaks
+    # mid-word.
+    return "".join(parts)
+
+
 def _cell_text(cell: _Cell) -> str:
     """Flatten one table cell to a single line.
 
@@ -188,7 +246,8 @@ def _cell_text(cell: _Cell) -> str:
     it reads only the cell's direct paragraphs.
     """
 
-    parts = [" ".join(cell.text.split())]
+    direct = " ".join(_paragraph_text(paragraph) for paragraph in cell.paragraphs)
+    parts = [" ".join(direct.split())]
     parts.extend(_text_box_blocks(cell._tc))
     parts.extend(
         " ".join(_cell_text(inner) for inner in row.cells)
@@ -321,7 +380,7 @@ def _parse_docx(data: bytes) -> ParsedDocument:
                 emit(serialised)
             continue
 
-        text = block.text.strip()
+        text = _paragraph_text(block).strip()
 
         if text:
             style_name = (block.style.name or "") if block.style else ""

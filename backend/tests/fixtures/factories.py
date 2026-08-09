@@ -239,6 +239,91 @@ def build_docx_blocks(blocks: list[tuple[str, object]]) -> bytes:
     return buffer.getvalue()
 
 
+# The wrappers Word puts between a paragraph and its runs. `python-docx` reads
+# through only the first two, so the rest are invisible to `Paragraph.text`.
+_RUN_WRAPPERS = {
+    "direct": '<w:r {w}><w:t xml:space="preserve">{text}</w:t></w:r>',
+    "hyperlink": (
+        '<w:hyperlink {w} w:anchor="bookmark">'
+        '<w:r><w:t xml:space="preserve">{text}</w:t></w:r>'
+        "</w:hyperlink>"
+    ),
+    "ins": (
+        '<w:ins {w} w:id="101" w:author="Reviewer" w:date="2024-01-01T00:00:00Z">'
+        '<w:r><w:t xml:space="preserve">{text}</w:t></w:r>'
+        "</w:ins>"
+    ),
+    "fldSimple": (
+        '<w:fldSimple {w} w:instr=" PAGEREF _Toc1 ">'
+        '<w:r><w:t xml:space="preserve">{text}</w:t></w:r>'
+        "</w:fldSimple>"
+    ),
+    "smartTag": (
+        '<w:smartTag {w} w:uri="urn:schemas-microsoft-com:office:smarttags"'
+        ' w:element="place">'
+        '<w:r><w:t xml:space="preserve">{text}</w:t></w:r>'
+        "</w:smartTag>"
+    ),
+    # Deleted text is stored under a different tag, which is what makes it
+    # excludable without a rule of its own.
+    "del": (
+        '<w:del {w} w:id="102" w:author="Reviewer" w:date="2024-01-01T00:00:00Z">'
+        '<w:r><w:delText xml:space="preserve">{text}</w:delText></w:r>'
+        "</w:del>"
+    ),
+}
+
+
+def build_docx_wrapped_runs(paragraphs: list[list[tuple[str, str]]]) -> bytes:
+    """Return a DOCX whose runs sit inside the given WordprocessingML wrappers.
+
+    Each paragraph is a list of (wrapper, text) pairs, written in order:
+
+        [[("direct", "Visible. "), ("ins", "Inserted.")],
+         [("del", "Removed.")]]
+
+    Wrappers are `direct`, `hyperlink`, `ins`, `fldSimple`, `smartTag` and
+    `del`. `python-docx` has no API for any of them, so they are injected as
+    raw XML — the same shapes Word writes for tracked changes, cross-reference
+    fields and smart tags.
+    """
+
+    document = docx.Document()
+
+    for runs in paragraphs:
+        paragraph = document.add_paragraph()
+        for wrapper, text in runs:
+            if wrapper not in _RUN_WRAPPERS:
+                raise ValueError(f"unknown run wrapper: {wrapper}")
+
+            paragraph._p.append(
+                parse_xml(_RUN_WRAPPERS[wrapper].format(w=nsdecls("w"), text=text))
+            )
+
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def build_docx_table_with_wrapped_runs(text: str) -> bytes:
+    """Return a DOCX whose single table cell holds text inside a `w:ins`."""
+
+    document = docx.Document()
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Name"
+    table.cell(0, 1).text = "Role"
+    table.cell(1, 0).text = "Ann"
+
+    cell = table.cell(1, 1)
+    cell.paragraphs[0]._p.append(
+        parse_xml(_RUN_WRAPPERS["ins"].format(w=nsdecls("w"), text=text))
+    )
+
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
 def build_docx_alternate_content_text_box(text: str) -> bytes:
     """Return a DOCX whose text box is written in both shape encodings.
 

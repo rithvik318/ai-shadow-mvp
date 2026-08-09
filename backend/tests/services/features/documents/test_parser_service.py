@@ -1,4 +1,9 @@
+import io
+
+import docx
 import pytest
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
 
 from app.core.exceptions import (
     DocumentParseError,
@@ -15,6 +20,8 @@ from tests.fixtures.factories import (
     build_docx_blocks,
     build_docx_nested_table,
     build_docx_table_with_text_box,
+    build_docx_table_with_wrapped_runs,
+    build_docx_wrapped_runs,
     build_markdown,
     build_pdf,
     build_pptx,
@@ -439,6 +446,130 @@ def test_parse_docx_rejects_a_document_of_only_empty_tables() -> None:
 
     with pytest.raises(EmptyDocumentError):
         parse_document(data, "blank-table.docx", DOCX_TYPE)
+
+
+# --- DOCX runs nested inside wrappers ------------------------------------
+
+
+@pytest.mark.parametrize("wrapper", ["ins", "hyperlink", "fldSimple", "smartTag"])
+def test_parse_docx_reads_a_run_wrapped_in_a_container(wrapper: str) -> None:
+    """Text is extracted whichever wrapper Word puts between it and the run.
+
+    `Paragraph.text` reads direct runs and hyperlinks only, so a tracked
+    insertion, a field result or a smart tag was previously invisible.
+    """
+
+    data = build_docx_wrapped_runs([[(wrapper, "Load-bearing sentence.")]])
+
+    parsed = parse_document(data, "wrapped.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "Load-bearing sentence."
+
+
+def test_parse_docx_joins_direct_and_nested_runs_in_one_paragraph() -> None:
+    """Runs concatenate in document order, whatever wraps each one.
+
+    Joined without a separator because Word splits a single word across runs
+    freely; anything else would insert a break mid-word.
+    """
+
+    data = build_docx_wrapped_runs(
+        [
+            [
+                ("direct", "Data "),
+                ("ins", "governance "),
+                ("smartTag", "Reston "),
+                ("fldSimple", "42 "),
+                ("hyperlink", "www.SunRadia.com"),
+            ]
+        ]
+    )
+
+    parsed = parse_document(data, "mixed.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "Data governance Reston 42 www.SunRadia.com"
+
+
+def test_parse_docx_excludes_deleted_text() -> None:
+    """A tracked deletion is not content and must not be indexed."""
+
+    data = build_docx_wrapped_runs(
+        [[("direct", "Kept. "), ("del", "Struck out. "), ("ins", "Added.")]]
+    )
+
+    parsed = parse_document(data, "tracked.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "Kept. Added."
+    assert "Struck out" not in parsed.text
+
+
+def test_parse_docx_keeps_paragraph_boundaries_across_wrappers() -> None:
+    """Each paragraph stays its own line, and their order is preserved."""
+
+    data = build_docx_wrapped_runs(
+        [
+            [("ins", "First paragraph.")],
+            [("direct", "Second paragraph.")],
+            [("fldSimple", "Third paragraph.")],
+        ]
+    )
+
+    parsed = parse_document(data, "ordered.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == (
+        "First paragraph.\nSecond paragraph.\nThird paragraph."
+    )
+
+
+def test_parse_docx_does_not_reject_a_document_whose_text_is_all_inserted() -> None:
+    """The real-corpus failure: a document of unaccepted tracked changes.
+
+    `LN_ECM_FDD Physical Data Model_DJP_04292009_v3.1.docx` has 570 paragraphs
+    of which `Paragraph.text` saw 17. It parsed "successfully" and indexed as
+    an empty shell, which is worse than failing.
+    """
+
+    data = build_docx_wrapped_runs(
+        [[("ins", "Table of Contents")], [("ins", "Design Approach for the model")]]
+    )
+
+    parsed = parse_document(data, "tracked.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == (
+        "Table of Contents\nDesign Approach for the model"
+    )
+
+
+def test_parse_docx_reads_a_wrapped_run_inside_a_table_cell() -> None:
+    """Cell text goes through the same paragraph reader as body text."""
+
+    data = build_docx_table_with_wrapped_runs("Lead architect")
+
+    parsed = parse_document(data, "celltracked.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "Name: Ann | Role: Lead architect"
+
+
+def test_parse_docx_counts_a_wrapped_run_as_a_heading() -> None:
+    """A heading whose text is inserted still titles its section."""
+
+    document = docx.Document()
+    heading = document.add_heading("", level=1)
+    heading._p.append(
+        parse_xml(
+            f'<w:ins {nsdecls("w")} w:id="9" w:author="A"'
+            f' w:date="2024-01-01T00:00:00Z">'
+            f"<w:r><w:t>Executive Summary</w:t></w:r></w:ins>"
+        )
+    )
+    document.add_paragraph("Body text.")
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    parsed = parse_document(buffer.getvalue(), "heading.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].section_title == "Executive Summary"
+    assert parsed.sections[0].text == "Body text."
 
 
 # --- PPTX ----------------------------------------------------------------
