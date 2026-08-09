@@ -1,4 +1,9 @@
+import io
+
+import docx
 import pytest
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
 
 from app.core.exceptions import (
     DocumentParseError,
@@ -15,13 +20,18 @@ from tests.fixtures.factories import (
     build_docx_blocks,
     build_docx_nested_table,
     build_docx_table_with_text_box,
+    build_docx_table_with_wrapped_runs,
+    build_docx_wrapped_runs,
     build_markdown,
     build_pdf,
+    build_pptx,
+    build_pptx_merged_table,
     build_text,
 )
 
 PDF_TYPE = "application/pdf"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PPTX_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 
 # --- format resolution ---------------------------------------------------
@@ -32,6 +42,7 @@ DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.docu
     [
         ("report.pdf", PDF_TYPE, "pdf"),
         ("report.docx", DOCX_TYPE, "docx"),
+        ("deck.pptx", PPTX_TYPE, "pptx"),
         ("notes.txt", "text/plain", "txt"),
         ("notes.md", "text/markdown", "md"),
         ("notes.markdown", "text/x-markdown", "md"),
@@ -51,6 +62,8 @@ def test_resolve_format_uses_declared_content_type(
         ("report.pdf", "pdf"),
         ("report.PDF", "pdf"),
         ("report.docx", "docx"),
+        ("deck.pptx", "pptx"),
+        ("deck.PPTX", "pptx"),
         ("notes.txt", "txt"),
         ("notes.md", "md"),
     ],
@@ -433,6 +446,343 @@ def test_parse_docx_rejects_a_document_of_only_empty_tables() -> None:
 
     with pytest.raises(EmptyDocumentError):
         parse_document(data, "blank-table.docx", DOCX_TYPE)
+
+
+# --- DOCX runs nested inside wrappers ------------------------------------
+
+
+@pytest.mark.parametrize("wrapper", ["ins", "hyperlink", "fldSimple", "smartTag"])
+def test_parse_docx_reads_a_run_wrapped_in_a_container(wrapper: str) -> None:
+    """Text is extracted whichever wrapper Word puts between it and the run.
+
+    `Paragraph.text` reads direct runs and hyperlinks only, so a tracked
+    insertion, a field result or a smart tag was previously invisible.
+    """
+
+    data = build_docx_wrapped_runs([[(wrapper, "Load-bearing sentence.")]])
+
+    parsed = parse_document(data, "wrapped.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "Load-bearing sentence."
+
+
+def test_parse_docx_joins_direct_and_nested_runs_in_one_paragraph() -> None:
+    """Runs concatenate in document order, whatever wraps each one.
+
+    Joined without a separator because Word splits a single word across runs
+    freely; anything else would insert a break mid-word.
+    """
+
+    data = build_docx_wrapped_runs(
+        [
+            [
+                ("direct", "Data "),
+                ("ins", "governance "),
+                ("smartTag", "Reston "),
+                ("fldSimple", "42 "),
+                ("hyperlink", "www.SunRadia.com"),
+            ]
+        ]
+    )
+
+    parsed = parse_document(data, "mixed.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "Data governance Reston 42 www.SunRadia.com"
+
+
+def test_parse_docx_excludes_deleted_text() -> None:
+    """A tracked deletion is not content and must not be indexed."""
+
+    data = build_docx_wrapped_runs(
+        [[("direct", "Kept. "), ("del", "Struck out. "), ("ins", "Added.")]]
+    )
+
+    parsed = parse_document(data, "tracked.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "Kept. Added."
+    assert "Struck out" not in parsed.text
+
+
+def test_parse_docx_keeps_paragraph_boundaries_across_wrappers() -> None:
+    """Each paragraph stays its own line, and their order is preserved."""
+
+    data = build_docx_wrapped_runs(
+        [
+            [("ins", "First paragraph.")],
+            [("direct", "Second paragraph.")],
+            [("fldSimple", "Third paragraph.")],
+        ]
+    )
+
+    parsed = parse_document(data, "ordered.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == (
+        "First paragraph.\nSecond paragraph.\nThird paragraph."
+    )
+
+
+def test_parse_docx_does_not_reject_a_document_whose_text_is_all_inserted() -> None:
+    """The real-corpus failure: a document of unaccepted tracked changes.
+
+    `LN_ECM_FDD Physical Data Model_DJP_04292009_v3.1.docx` has 570 paragraphs
+    of which `Paragraph.text` saw 17. It parsed "successfully" and indexed as
+    an empty shell, which is worse than failing.
+    """
+
+    data = build_docx_wrapped_runs(
+        [[("ins", "Table of Contents")], [("ins", "Design Approach for the model")]]
+    )
+
+    parsed = parse_document(data, "tracked.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == (
+        "Table of Contents\nDesign Approach for the model"
+    )
+
+
+def test_parse_docx_reads_a_wrapped_run_inside_a_table_cell() -> None:
+    """Cell text goes through the same paragraph reader as body text."""
+
+    data = build_docx_table_with_wrapped_runs("Lead architect")
+
+    parsed = parse_document(data, "celltracked.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "Name: Ann | Role: Lead architect"
+
+
+def test_parse_docx_counts_a_wrapped_run_as_a_heading() -> None:
+    """A heading whose text is inserted still titles its section."""
+
+    document = docx.Document()
+    heading = document.add_heading("", level=1)
+    heading._p.append(
+        parse_xml(
+            f'<w:ins {nsdecls("w")} w:id="9" w:author="A"'
+            f' w:date="2024-01-01T00:00:00Z">'
+            f"<w:r><w:t>Executive Summary</w:t></w:r></w:ins>"
+        )
+    )
+    document.add_paragraph("Body text.")
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    parsed = parse_document(buffer.getvalue(), "heading.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].section_title == "Executive Summary"
+    assert parsed.sections[0].text == "Body text."
+
+
+# --- PPTX ----------------------------------------------------------------
+
+
+def test_parse_pptx_returns_one_section_per_slide_with_slide_numbers() -> None:
+    """Each slide becomes a section, numbered from one, in slide order."""
+
+    data = build_pptx(
+        [{"title": "One"}, {"title": "Two"}, {"title": "Three"}],
+    )
+
+    parsed = parse_document(data, "deck.pptx", PPTX_TYPE)
+
+    assert parsed.page_count == 3
+    assert [section.page_number for section in parsed.sections] == [1, 2, 3]
+    assert [section.text for section in parsed.sections] == ["One", "Two", "Three"]
+
+
+def test_parse_pptx_extracts_a_title_slide() -> None:
+    """A title placeholder becomes both the section title and its first line.
+
+    Repeated rather than only stored as `section_title` because a divider slide
+    often has no other content, and dropping it would drop the slide.
+    """
+
+    parsed = parse_document(
+        build_pptx([{"title": "Data Governance"}]), "d.pptx", PPTX_TYPE
+    )
+
+    assert parsed.sections[0].section_title == "Data Governance"
+    assert parsed.sections[0].text == "Data Governance"
+
+
+def test_parse_pptx_extracts_a_body_placeholder_under_its_title() -> None:
+    """Bullet text follows the title it belongs to."""
+
+    data = build_pptx([{"title": "Approach", "body": "Assess\nDesign\nDeliver"}])
+
+    parsed = parse_document(data, "deck.pptx", PPTX_TYPE)
+
+    assert parsed.sections[0].text == "Approach\nAssess\nDesign\nDeliver"
+
+
+def test_parse_pptx_orders_shapes_by_position_not_by_z_order() -> None:
+    """Reading order follows the slide, not the order shapes were added.
+
+    The fixture adds the lowest box first, so a parser that trusted the shape
+    collection's own order would emit the slide bottom-up.
+    """
+
+    data = build_pptx([{"boxes": [(5, "Bottom"), (1, "Top"), (3, "Middle")]}])
+
+    parsed = parse_document(data, "deck.pptx", PPTX_TYPE)
+
+    assert parsed.sections[0].text == "Top\nMiddle\nBottom"
+
+
+def test_parse_pptx_keeps_the_title_first_regardless_of_its_position() -> None:
+    """The title leads even when a shape sits above it on the slide."""
+
+    data = build_pptx([{"title": "Heading", "boxes": [(0.1, "Sits above the title")]}])
+
+    parsed = parse_document(data, "deck.pptx", PPTX_TYPE)
+
+    assert parsed.sections[0].text.splitlines()[0] == "Heading"
+
+
+def test_parse_pptx_reads_shapes_inside_a_group() -> None:
+    """Grouped shapes are walked through, in their own reading order."""
+
+    data = build_pptx(
+        [{"boxes": [(1, "Before")], "group": [(5, "Group lower"), (3, "Group upper")]}]
+    )
+
+    parsed = parse_document(data, "deck.pptx", PPTX_TYPE)
+
+    assert parsed.sections[0].text == "Before\nGroup upper\nGroup lower"
+
+
+def test_parse_pptx_serialises_a_table_the_same_way_docx_does() -> None:
+    """One `Header: value` line per row, identical to the DOCX serialiser."""
+
+    grid = [["Metric", "Value"], ["Revenue", "10"], ["Margin", "22%"]]
+
+    from_pptx = parse_document(build_pptx([{"table": grid}]), "d.pptx", PPTX_TYPE)
+    from_docx = parse_document(
+        build_docx_blocks([("table", grid)]), "d.docx", DOCX_TYPE
+    )
+
+    assert from_pptx.sections[0].text == from_docx.sections[0].text
+    assert from_pptx.sections[0].text == (
+        "Metric: Revenue | Value: 10\nMetric: Margin | Value: 22%"
+    )
+
+
+def test_parse_pptx_collapses_a_merged_table_cell() -> None:
+    """A spanned cell is reported once, not once per column it covers."""
+
+    data = build_pptx_merged_table([["Name", "Role"], ["Ann", "Lead"]])
+
+    parsed = parse_document(data, "deck.pptx", PPTX_TYPE)
+
+    assert parsed.sections[0].text.count("Name Role") == 1
+    assert parsed.sections[0].text.endswith("Ann | Lead")
+
+
+def test_parse_pptx_appends_labelled_speaker_notes() -> None:
+    """Notes come last and are marked as the presenter's, not the slide's."""
+
+    data = build_pptx([{"title": "Pricing", "notes": "Do not quote a number"}])
+
+    parsed = parse_document(data, "deck.pptx", PPTX_TYPE)
+
+    assert parsed.sections[0].text == ("Pricing\nSpeaker notes: Do not quote a number")
+
+
+def test_parse_pptx_handles_a_mixed_layout_slide() -> None:
+    """Title, body, free text box, table and notes on one slide, in order."""
+
+    data = build_pptx(
+        [
+            {
+                "title": "Engagement",
+                "body": "Scope agreed",
+                "boxes": [(4, "Footnote box")],
+                "table": [["Phase", "Weeks"], ["Discovery", "4"]],
+                "notes": "Mention the pilot",
+            }
+        ]
+    )
+
+    parsed = parse_document(data, "deck.pptx", PPTX_TYPE)
+
+    assert parsed.sections[0].text == (
+        "Engagement\n"
+        "Scope agreed\n"
+        "Footnote box\n"
+        "Phase: Discovery | Weeks: 4\n"
+        "Speaker notes: Mention the pilot"
+    )
+
+
+def test_parse_pptx_includes_hidden_slides() -> None:
+    """Hidden slides are extracted, deliberately.
+
+    A hidden slide is authored content that was set aside for one audience —
+    usually backup detail worth answering questions from. Skipping it would be
+    a silent content loss of exactly the kind this parser exists to stop.
+    """
+
+    data = build_pptx([{"title": "Shown"}, {"title": "Backup detail", "hidden": True}])
+
+    parsed = parse_document(data, "deck.pptx", PPTX_TYPE)
+
+    assert [section.text for section in parsed.sections] == ["Shown", "Backup detail"]
+
+
+def test_parse_pptx_skips_slides_with_no_text_but_still_counts_them() -> None:
+    """An image-only slide contributes no section, as a blank PDF page does."""
+
+    data = build_pptx([{"title": "Has text"}, {}, {"title": "Also has text"}])
+
+    parsed = parse_document(data, "deck.pptx", PPTX_TYPE)
+
+    assert parsed.page_count == 3
+    assert [section.page_number for section in parsed.sections] == [1, 3]
+
+
+def test_parse_pptx_rejects_a_presentation_with_no_slides() -> None:
+    """An empty deck is rejected rather than stored with nothing in it."""
+
+    with pytest.raises(EmptyDocumentError):
+        parse_document(build_pptx([]), "empty.pptx", PPTX_TYPE)
+
+
+def test_parse_pptx_rejects_a_presentation_with_no_text() -> None:
+    """Slides exist but none carries text, so there is nothing to index."""
+
+    with pytest.raises(EmptyDocumentError):
+        parse_document(build_pptx([{}, {}]), "blank.pptx", PPTX_TYPE)
+
+
+def test_parse_pptx_raises_document_parse_error_for_corrupt_bytes() -> None:
+    """Bytes claiming to be a PPTX but which are not raise a parse error."""
+
+    with pytest.raises(DocumentParseError):
+        parse_document(b"this is not a presentation", "broken.pptx", PPTX_TYPE)
+
+
+def test_parse_pptx_recovers_from_a_slide_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unreadable slide costs its own content, not the whole deck."""
+
+    from app.services.features.documents import parser_service
+
+    original = parser_service._slide_blocks
+    calls: list[int] = []
+
+    def exploding(slide):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ValueError("malformed shape tree")
+        return original(slide)
+
+    monkeypatch.setattr(parser_service, "_slide_blocks", exploding)
+
+    data = build_pptx([{"title": "One"}, {"title": "Two"}, {"title": "Three"}])
+    parsed = parse_document(data, "deck.pptx", PPTX_TYPE)
+
+    assert parsed.page_count == 3
+    assert [section.text for section in parsed.sections] == ["One", "Three"]
 
 
 # --- Markdown ------------------------------------------------------------

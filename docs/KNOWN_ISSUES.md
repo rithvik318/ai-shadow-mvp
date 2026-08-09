@@ -12,10 +12,22 @@ There is no auth layer. All ingestion runs as a single placeholder owner, `MVP_U
 - **Mitigation in place:** every table carries `user_id` and every query filters on it, so adding auth is a change to where that value comes from — not a migration or a backfill.
 - **Priority:** High — before real user data.
 
-### Ingestion is synchronous
-Parsing, chunking and persistence all happen inside the upload request.
-- **Impact:** a large document holds a request open for its whole processing time. There is no progress reporting beyond the final status.
-- **Priority:** Medium — revisit when real document sizes make it a problem, per `DECISIONS.md`.
+### Ingestion is synchronous, and now includes an embedding round trip
+Parsing, chunking, embedding and persistence all happen inside the upload request.
+- **Impact:** upload latency now includes a provider call, so it depends on network conditions and provider load as well as document size. A large document holds a request open for its whole processing time, and there is no progress reporting beyond the final status.
+- **Mitigation in place:** embedding is batched at `EMBEDDING_BATCH_SIZE` texts per call rather than one call per chunk.
+- **Priority:** Medium — the case for background ingestion is stronger than it was, per `DECISIONS.md`.
+
+### Embedding cost is unmeasured
+Every chunk of every upload is embedded, and re-uploading the same document embeds it again — there is no content-hash deduplication.
+- **Impact:** cost scales with upload volume including duplicates, and nothing reports it.
+- **Priority:** Medium — worth a look once real usage exists.
+
+### `failed` has two meanings
+A document can be `failed` because it could not be parsed (no chunks) or because it could not be embedded (chunks, no vectors). The status alone does not distinguish them.
+- **Impact:** an operator has to check whether chunks exist to know whether a backfill will help.
+- **Mitigation in place:** `count_unembedded_chunks()` answers it in one query, and the backfill is safe to run either way.
+- **Priority:** Low — a distinct status would be clearer if this becomes common.
 
 ### Scanned documents are rejected, not OCR'd
 A PDF with no text layer yields no extractable text and is recorded as `failed`.
@@ -36,20 +48,21 @@ Page boundaries in DOCX are a rendering property, so chunks from a DOCX carry a 
 
 ## Carried-forward decisions to revisit
 
-### Three components have no caller
-The LLM provider abstraction, prompt system and Analysis Engine were ported for the retrieval feature, which is not yet built.
+### Two components have no caller
+The prompt system and Analysis Engine were ported for the chat feature, which is not yet built. The LLM provider abstraction left this list when embeddings started using it.
 - **Impact:** tested code that nothing exercises end to end.
-- **Priority:** Medium — if retrieval is not built, remove them rather than leaving them indefinitely.
+- **Priority:** Medium — if chat is not built, remove them rather than leaving them indefinitely.
 
 ### `langchain-text-splitters` carries more weight than it earns
 Used for one function, `RecursiveCharacterTextSplitter`, and pulls a transitive tree considerably larger than that.
 - **Impact:** dependency surface out of proportion to the feature.
 - **Priority:** Low — it is used in exactly one place and is straightforward to replace.
 
-### OpenRouter embedding support is unverified
-The retrieval phase assumes `client.embeddings.create()` works against OpenRouter's OpenAI-compatible embeddings endpoint. The endpoint is documented; official Python SDK compatibility is not explicitly stated.
-- **Impact:** if it does not work, embeddings must call OpenAI directly, which changes the provider story for that one call.
-- **Priority:** High for Phase 2 — time-box a check before building.
+### OpenRouter embedding support has not been exercised live
+OpenRouter announced `POST /api/v1/embeddings` on 16 July 2026, which is the path the OpenAI SDK produces against the configured `base_url`. It is not yet listed in the API reference, and no live call has been made from this codebase.
+- **Impact:** if the endpoint is not SDK-compatible in practice, ingestion fails at the embedding step with a `502` and the document is marked `failed`.
+- **Mitigation in place:** `python -m scripts.verify_embedding_provider` makes one live call and reports the width. The fallback is `EMBEDDING_PROVIDER=openai` with `EMBEDDING_MODEL=text-embedding-3-small` — an `.env` change, no code change. Documents that failed can be completed with the backfill.
+- **Priority:** High — run the verification script before the first real upload.
 
 ---
 

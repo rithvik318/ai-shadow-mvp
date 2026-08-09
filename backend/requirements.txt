@@ -17,6 +17,7 @@ pgvector
 # Document ingestion
 pypdf
 python-docx
+python-pptx
 langchain-text-splitters
 
 # LLM provider (used by the retrieval/chat feature; see docs/ROADMAP.md)

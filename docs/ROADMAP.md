@@ -6,7 +6,7 @@ The MVP is one sentence: **users upload documents, the documents are indexed, us
 
 ## Current phase
 
-**Phase 1 — Ingestion. Complete.**
+**Phase 4 — RAG chat. Complete.**
 
 ---
 
@@ -22,24 +22,28 @@ The MVP is one sentence: **users upload documents, the documents are indexed, us
 - Domain errors mapped to specific HTTP status codes with a consistent body.
 - Test suite covering parsing, chunking, ingestion, validation and the HTTP surface.
 - Ruff configured for linting and formatting.
+- Embedding generation wired into ingestion, with batching, order-preserving vector assignment, and dimension validation against the column width.
+- Embedding provider configurable independently of the completion provider, so a provider that does not serve embeddings is an environment change rather than a code change.
+- Backfill for chunks with no vector, covering documents ingested before embeddings existed and uploads whose embedding step failed.
+- Semantic retrieval: top-k cosine search executed in the database, configurable `top_k` and similarity floor, restricted to `indexed` documents and scoped by user.
+- Dialect-aware `cosine_distance`, so the retrieval query is exercised by the SQLite suite and verified against real pgvector by an opt-in test.
+- Stateless RAG chat: `POST /chat` answers from retrieved passages through the registered `rag_answer` prompt, returning the passages the model was shown.
 
 ---
 
-## Next: Phase 2 — Embeddings
+## Next: Phase 5 — Frontend
 
-Populate `document_chunks.embedding` through a provider-agnostic embedding service built on the existing LLM client. Requires no schema change.
+React and Tailwind over the API that now exists end to end.
 
-The one open question to settle first: whether `client.embeddings.create()` works against OpenRouter's OpenAI-compatible embeddings endpoint, or whether embeddings should call OpenAI directly. Time-box that check before building.
+Settle first, on real documents: the similarity floor. The 0.0 default excludes only passages pointing the opposite way, which is permissive — it hands the model loosely related context rather than admitting there is none. Too high and the system says "I don't know" about documents it holds. Now that answers are visible, this is the single number most likely to make them feel wrong, and it can finally be judged by reading the output.
+
+Worth adding alongside it: `POST /search`, exposing retrieval without the model, which makes that tuning a great deal easier.
 
 ---
 
 ## Then
 
-**Phase 3 — Retrieval.** Top-k cosine similarity search over chunks, scoped by user, with a similarity floor and metadata returned alongside content.
-
-**Phase 4 — RAG chat with citations.** `POST /chat` retrieving context and answering through the Analysis Engine against a `RagAnswer` schema, so citations arrive as validated structured data rather than prose. Explicit handling for an empty knowledge base and for no chunk clearing the floor: the model says it does not know rather than inventing an answer.
-
-**Phase 5 — Frontend.** React and Tailwind: upload with progress and indexing status, document list, chat, and a source panel rendering each citation as document and page.
+**Phase 5 detail —** React and Tailwind: upload with progress and indexing status, document list, chat, and a source panel rendering each citation as document and page.
 
 **Phase 6 — Hardening.** Authentication and real per-user scoping, CI, background ingestion, and whatever the first real documents expose about extraction quality.
 

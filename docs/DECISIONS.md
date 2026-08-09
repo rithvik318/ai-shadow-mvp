@@ -82,7 +82,7 @@ Why the codebase is shaped the way it is. Entries are chronological, oldest firs
 - **Decision:** Store embeddings as a `vector(1536)` column on `document_chunks`, created — with its HNSW index — in the baseline migration, nullable and unpopulated. Ship a `docker-compose.yml` using `pgvector/pgvector:pg16`.
 - **Context:** The requirement was that embeddings be addable without a schema change. Alternatives were a JSON column (portable but unindexable, and it would need migrating before retrieval works) and a separate vector store such as Chroma.
 - **Rationale:** Citations require joining a retrieved vector back to its document, page and heading. With pgvector that is one query; with a separate store it is a query, a lookup and application-side reconciliation. One datastore also means one backup story and one connection pool. Creating the index now over an empty column costs nothing, since HNSW builds incrementally.
-- **Consequences:** Postgres with the pgvector extension is required, which is why the compose file exists rather than assuming a local install. The model declares the column as `Vector(...).with_variant(JSON(), "sqlite")` so the test suite runs on in-memory SQLite with no services present — the column exists in both dialects, which is what preserves the no-migration promise.
+- **Consequences:** Postgres with the pgvector extension is required, which is why the compose file exists rather than assuming a local install. The model declares the column as `Vector(...).with_variant(JSON(none_as_null=True), "sqlite")` so the test suite runs on in-memory SQLite with no services present — the column exists in both dialects, which is what preserves the no-migration promise. The `none_as_null=True` is not decoration: SQLAlchemy's `JSON` defaults to storing a Python `None` as the JSON encoding of `null` rather than SQL NULL, which made `embedding IS NULL` match nothing on SQLite while matching correctly on pgvector. A variant that disagrees with production about a value's meaning is worse than no variant, because the suite still passes. Any future `with_variant` needs the same scrutiny.
 - **Status:** Accepted — in effect.
 
 ---
@@ -167,6 +167,161 @@ Why the codebase is shaped the way it is. Entries are chronological, oldest firs
 - **Decision:** The root `conftest.py` only resets the prompt registry. The in-memory database fixture lives in `tests/support/database.py` and is re-exported by the two directories that need it.
 - **Rationale:** Parser and chunker tests are pure functions over bytes. A root `conftest.py` importing the engine would make every test in the suite depend on database packages being importable.
 - **Consequences:** Two thin `conftest.py` files re-export one fixture instead of one declaring it.
+- **Status:** Accepted — in effect.
+
+---
+
+## The embedding provider is configurable independently of the completion provider
+
+- **Date:** 2026-07-29
+- **Decision:** `EMBEDDING_PROVIDER` overrides `LLM_PROVIDER` for embeddings only, and clients are cached per provider name rather than as one singleton. Unset means "same provider as completions".
+- **Context:** OpenRouter announced an embeddings endpoint on 16 July 2026 at `POST /api/v1/embeddings`, which is the path the OpenAI SDK produces against our configured `base_url`. It is not yet in the API reference, and we have not made a live call against it.
+- **Rationale:** The provider-independence decision is worth nothing if an unavailable capability at one provider forces a code change. Making the embedding provider a separate setting means the fallback — embeddings to OpenAI, completions unchanged — is an `.env` edit. `scripts/verify_embedding_provider.py` turns the open question into a ten-second check.
+- **Consequences:** Two providers may be live at once, so two API keys may be needed. `get_client()` caches per provider to avoid rebuilding either.
+- **Status:** Accepted — in effect.
+
+---
+
+## A document is not `indexed` until its chunks are embedded
+
+- **Date:** 2026-07-29
+- **Decision:** Ingestion embeds before setting `status="indexed"`. An embedding failure marks the document `failed` and returns `502`.
+- **Context:** Before this change, ingestion stored chunks with a null `embedding` and reported `indexed`.
+- **Rationale:** `indexed` should mean retrievable. A document with no vectors is invisible to similarity search, and the failure is silent: the user asks a question, gets "nothing relevant found", and has no way to tell that from a genuinely unrelated question. Making the status honest turns a silent failure into a visible one.
+- **Consequences:** Upload latency now includes an embedding round trip. Documents ingested before this change still report `indexed` while having no vectors — `scripts/backfill_embeddings.py` exists to correct exactly that.
+- **Status:** Accepted — in effect.
+
+---
+
+## Embedding failures keep the parsed chunks; parse failures do not
+
+- **Date:** 2026-07-29
+- **Decision:** When embedding fails, the document is marked `failed` but its chunks are kept, and `embed_document_chunks` is idempotent so a later run completes it.
+- **Rationale:** The two failures are not alike. A parse failure is deterministic — the same bytes will fail again, so keeping partial output is clutter. An embedding failure is usually a transient provider outage, and the parse work is still valid and already paid for. Keeping it means recovery is a backfill rather than a re-upload, which matters when the user no longer has the file to hand.
+- **Consequences:** `failed` can mean two things, distinguished by whether chunks exist. `count_unembedded_chunks()` is the single query that tells them apart.
+- **Status:** Accepted — in effect.
+
+---
+
+## Embedding stays synchronous, and the stack stays sync
+
+- **Date:** 2026-07-29
+- **Decision:** Embedding runs inside the upload request. No `async` was introduced.
+- **Context:** Async was requested for the retrieval layer. Embedding is I/O-bound, so it is the obvious candidate.
+- **Rationale:** The benefit is real but the cost is a fractured stack: SQLAlchemy's sync `Session`, the sync session dependency, and every existing service are synchronous, so an async embedding path would either block the event loop anyway or force `asyncpg` and an async session across the whole codebase. That is a coherent change to make deliberately, not a side effect of one feature. Batching already removes most of the latency this would address — one call for sixty-four chunks, not sixty-four calls.
+- **Consequences:** Upload holds a worker thread for the duration of the embedding call. Going async later is a single planned migration rather than an accumulation of half-async paths.
+- **Status:** Accepted — in effect.
+
+---
+
+## Vectors are matched to chunks by the provider's index, not by arrival order
+
+- **Date:** 2026-07-29
+- **Decision:** `EmbeddingService` sorts the response by each item's `index` before zipping vectors to inputs, and rejects a response whose length differs from the batch.
+- **Rationale:** The API documents order preservation, but a reordering would attach every vector to the wrong chunk, and nothing downstream could detect it — retrieval would return confidently wrong citations. Sorting on a field the response already carries costs nothing and removes the need to trust the guarantee.
+- **Status:** Accepted — in effect.
+
+---
+
+## Cosine distance is one dialect-aware construct, guarded by a real-pgvector test
+
+- **Date:** 2026-07-30
+- **Decision:** `app/database/vector.py` defines a `cosine_distance` construct compiling to pgvector's `<=>` on Postgres and to a `cosine_distance(a, b)` call on SQLite, which the test fixtures register as a Python function. One opt-in test (`-m postgres`) runs the identical `search()` against a live pgvector database and asserts the same ordering and the same similarity values.
+- **Context:** Similarity search is a Postgres operator, and the suite runs on SQLite by an earlier decision. The alternatives were to require a live database for retrieval tests, or to rank in Python.
+- **Rationale:** Ranking in Python would ignore the HNSW index and degrade linearly with corpus size — it solves a testing problem by making production worse. Requiring a live database would cost the service-free suite and block CI. The construct keeps exactly one query in production code while leaving it executable in tests. The pgvector test exists because a stand-in that silently disagrees with the real thing is precisely how the PR 1 NULL-semantics defect survived review: a green suite proved nothing about production. Asserting the two agree, rather than assuming it, is the whole point.
+- **Consequences:** A dialect difference now lives in one file rather than in the service. The SQLite function is registered by test fixtures, not by the application, because SQLite is not a supported production dialect. Any future vector operator needs the same treatment and the same paired test.
+- **Status:** Accepted — in effect.
+
+---
+
+## Search is restricted to `indexed` documents
+
+- **Date:** 2026-07-30
+- **Decision:** Retrieval joins `documents` and requires `status = indexed`. Chunks with no vector are excluded, as are rows whose computed distance is NULL.
+- **Rationale:** A document mid-ingestion, or one whose embedding step failed, holds only part of itself. Answering from it would produce a confident citation drawn from a fragment, which is worse than not answering — and the user has no way to tell the difference. The NULL-distance filter is not decoration either: a stored vector of the wrong width or of zero length has no defined similarity, and SQLite and Postgres sort NULLs to opposite ends, so leaving them in would give two dialects two different answers.
+- **Consequences:** A failed document stays invisible to search until the backfill completes it, which is the intended relationship between the two features.
+- **Status:** Accepted — in effect.
+
+---
+
+## An empty corpus is checked before the query is embedded
+
+- **Date:** 2026-07-30
+- **Decision:** `search()` probes for a single eligible chunk before calling the embedding provider, and returns `[]` if there is none.
+- **Rationale:** On a fresh install the common case is no documents at all. Embedding first would charge for a call whose result cannot match anything, and — with no key configured yet — would surface a provider error where the honest answer is "there is nothing here". The probe is one indexed lookup with `LIMIT 1`.
+- **Consequences:** One extra cheap query per search. Worth it to keep an empty knowledge base a normal state rather than a failure.
+- **Status:** Accepted — in effect.
+
+---
+
+## Cosine similarity, not L2 or inner product
+
+- **Date:** 2026-07-30
+- **Decision:** Rank by cosine similarity, via pgvector's `<=>` cosine-distance operator. Similarity is reported to callers as `1 - distance`, in `[-1, 1]`.
+- **Context:** pgvector offers L2 (`<->`), inner product (`<#>`) and cosine (`<=>`), and the choice interacts with the index built in migration 0001.
+- **Rationale:** Four reasons, in descending order of how much getting it wrong would hurt. First, the HNSW index is built `USING hnsw (embedding vector_cosine_ops)`, and an index is only usable by the operator class it was built for — searching with L2 would return correct answers while silently falling back to a sequential scan, which is the kind of failure that looks fine in testing and becomes catastrophic at scale. Second, cosine is invariant to magnitude, so a long chunk is not scored differently from a short one purely for having a larger norm; L2 over unnormalised vectors conflates "different meaning" with "different length", which is precisely the wrong bias when chunks vary in size by design. Third, the `[-1, 1]` bound makes the configurable threshold a number a human can reason about and carry between models, where an L2 threshold is unbounded and specific to one embedding space. Fourth, `openai/text-embedding-3-small` returns unit-normalised vectors, for which cosine and inner product rank identically — so cosine costs nothing today and stays correct if a model that does not normalise is adopted later.
+- **Consequences:** Changing the metric means changing the index, in a migration, and re-tuning the threshold. The chosen metric is documented at the top of `retrieval_service.py` so nobody has to infer it from an operator.
+- **Status:** Accepted — in effect.
+
+---
+
+## The similarity floor is configurable and can be switched off
+
+- **Date:** 2026-07-30
+- **Decision:** `RETRIEVAL_SIMILARITY_THRESHOLD` sets the floor and may be empty to disable filtering entirely; `search(similarity_threshold=...)` overrides it per call, and passing `None` disables the floor for that call. A module-level `UNSET` sentinel distinguishes "argument omitted" from "explicitly disabled".
+- **Rationale:** No floor is right for every corpus, and the right value can only be found by measuring against real documents — so the value must not be baked into the code, and "no floor at all" has to be reachable while tuning. Without the sentinel, `None` would be indistinguishable from "not supplied", leaving no way to disable a floor that configuration had turned on.
+- **Consequences:** Excluding rows whose distance is undefined can no longer ride along on the threshold comparison, because there may not be one. `distance IS NOT NULL` is now an explicit predicate, with its own test.
+- **Status:** Accepted — in effect.
+
+---
+
+## Deduplication pages the ranking rather than over-fetching a fixed multiple
+
+- **Date:** 2026-07-30
+- **Decision:** Results drop a chunk whose content exactly matches an earlier, higher-scoring result. The query is paged — ordered by `(distance, id)` for a stable sequence — until `top_k` unique chunks are collected or the corpus is exhausted, subject to a candidate ceiling that is logged when reached.
+- **Context:** The first implementation fetched `2 × top_k` and deduplicated within it. That is simpler, but no fixed multiple can guarantee `top_k` unique results against an unknown number of duplicates: a document whose first twenty chunks are the same header would quietly return one result where five were asked for.
+- **Rationale:** Deduplication is supposed to improve the result set, not shrink it. Paging costs an extra round trip only when duplicates are actually present — the common case still completes in one. The `id` tiebreak matters more than it looks: without a deterministic order, two chunks at equal distance can swap between pages and be returned twice or skipped entirely.
+- **Consequences:** A pathological corpus is bounded by the candidate ceiling rather than paging indefinitely, and truncation there is logged rather than passed over in silence. Near-duplicate detection is still deliberately not attempted: chunk overlap makes neighbours share text by design, and a "close enough to be the same" threshold is a judgement that should not be made silently inside a search function.
+- **Status:** Accepted — in effect.
+
+---
+
+## Chat sources come from retrieval, not from the model
+
+- **Date:** 2026-07-31
+- **Decision:** `POST /chat` returns the passages that were retrieved and placed in the prompt. The model produces only prose; it is never asked to name its sources, and `AnalysisEngine` is not used.
+- **Context:** The alternative, sketched in earlier architecture notes, was to have the model cite by index and validate those indices through `AnalysisEngine` against a `RagAnswer` schema.
+- **Rationale:** A source drawn from retrieval cannot be fabricated — the model has no way to name a document that was not fetched. Model-produced citations can point at the wrong passage, or at an index that does not exist, and validation only catches the second. For an MVP whose whole promise is "answers you can check", a citation that is structurally incapable of being invented is worth more than one that is finer-grained but occasionally wrong.
+- **Consequences:** Attribution is at the level of the request, not the sentence: every retrieved passage is listed, including any the model ignored. Moving to sentence-level attribution means adopting the index-and-validate approach, and is tracked in `FEATURES.md`. `AnalysisEngine` consequently still has no caller.
+- **Status:** Accepted — in effect.
+
+---
+
+## An empty or irrelevant knowledge base is answered, not raised
+
+- **Date:** 2026-07-31
+- **Decision:** When retrieval returns nothing, chat returns HTTP 200 with a fixed "I could not find anything in your documents" answer, no sources, and `retrieved_chunks: 0`. The model is not called.
+- **Rationale:** Having no relevant documents is a normal state, not a failure — on a fresh install it is the *expected* state. Raising would force clients to treat it as an error path, and `retrieved_chunks` already lets them distinguish it from a grounded answer without inspecting prose. Skipping the model call matters more than the status code: asking a model to answer with no context invites exactly the invention the prompt spends five rules forbidding, and charges for it.
+- **Consequences:** A caller must read `retrieved_chunks`, not just `answer`, to know whether anything was found. Provider failures still return 502, so the two cases never blur.
+- **Status:** Accepted — in effect.
+
+---
+
+## `RetrievalError` maps to 422, separately from provider failures
+
+- **Date:** 2026-07-31
+- **Decision:** A dedicated handler maps `RetrievalError` — a blank question, an out-of-range `top_k` — to 422, leaving `LLMServiceError` and its subclasses on 502.
+- **Rationale:** One is the caller's mistake and the other is not, and the status code is what tells a client whether retrying unchanged could ever work. Collapsing them would tell a client to retry a request that will always fail, or to give up on one that would succeed in a minute.
+- **Status:** Accepted — in effect.
+
+---
+
+## `ai_shadow` was replaced by `rag_answer` rather than kept alongside it
+
+- **Date:** 2026-07-31
+- **Decision:** The `ai_shadow` prompt, carried from the prototype as a placeholder for this feature, is removed; `rag_answer` takes its place with the grounding rules the feature actually needs.
+- **Rationale:** `ai_shadow` existed only to hold the shape of a retrieval prompt until chat was built. Shipping both would leave one permanently unused, which the operating manual forbids and which earlier entries in this log flagged as debt to settle. Its two-line instruction was also too weak for the job: the prompt now states explicitly that context is the only source of truth, forbids introducing facts, requires saying so when the answer is absent, and asks for synthesis across passages rather than a passage-by-passage summary.
+- **Consequences:** `EXPECTED_PROMPT_NAMES` in `tests/prompts/test_system.py` changed to match — a factual update to the prompt set, not a relaxed assertion. `assistant` remains registered and still has no caller.
 - **Status:** Accepted — in effect.
 
 ---

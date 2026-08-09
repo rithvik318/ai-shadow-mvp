@@ -7,10 +7,16 @@ from sqlalchemy.orm import Session
 from app.core.exceptions import EmbeddingError
 from app.models.document import DocumentChunk, DocumentStatus
 from app.services.llm.embedding_service import embedding_service
-from tests.fixtures.factories import build_docx, build_markdown, build_pdf
+from tests.fixtures.factories import (
+    build_docx,
+    build_markdown,
+    build_pdf,
+    build_pptx,
+)
 
 PDF_TYPE = "application/pdf"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PPTX_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 
 def _upload(client: TestClient, data: bytes, name: str, content_type: str):
@@ -44,6 +50,21 @@ def test_upload_docx_is_accepted(client: TestClient) -> None:
 
     assert response.status_code == 201
     assert response.json()["status"] == DocumentStatus.INDEXED.value
+
+
+def test_upload_pptx_is_accepted(client: TestClient) -> None:
+    response = _upload(
+        client,
+        build_pptx([{"title": "Overview", "body": "Bullet one"}, {"title": "Next"}]),
+        "deck.pptx",
+        PPTX_TYPE,
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == DocumentStatus.INDEXED.value
+    # Slides are counted the way PDF pages are.
+    assert body["page_count"] == 2
 
 
 def test_upload_markdown_is_accepted(client: TestClient) -> None:

@@ -7,9 +7,39 @@ The authoritative answer to "does X exist today". Where this document and [`ARCH
 ## Implemented
 
 ### Document Upload & Ingestion
-Upload a PDF, DOCX, TXT or Markdown file; it is validated, its text extracted with page and heading provenance, split into overlapping chunks, and persisted ready for embedding. `POST /documents/upload`.
+Upload a PDF, DOCX, TXT or Markdown file; it is validated, its text extracted with page and heading provenance, split into overlapping chunks, embedded, and persisted. `POST /documents/upload`. A document reaches `indexed` only once every chunk carries a vector.
 - **Status:** Implemented
-- **Dependencies:** Document Models & Migrations, Configuration Management
+- **Dependencies:** Embedding Generation, Document Models & Migrations, Configuration Management
+
+### Embedding Generation
+Chunk text is embedded through the configured provider and stored in `document_chunks.embedding`. Requests are batched, vectors are matched to chunks by the provider's index, and a width that disagrees with the column is rejected before storage. The embedding provider can be configured independently of the completion provider.
+- **Status:** Implemented
+- **Dependencies:** LLM Provider Abstraction, Document Models & Migrations
+
+### Embedding Backfill
+Embeds chunks that have no vector — documents ingested before embeddings existed, and documents whose embedding step failed at upload. Idempotent and resumable, committed per document. `python -m scripts.backfill_embeddings`.
+- **Status:** Implemented
+- **Dependencies:** Embedding Generation
+
+### Embedding Provider Verification
+A one-shot live call reporting the configured provider, model and returned width, so a misconfiguration is caught before any document is ingested. `python -m scripts.verify_embedding_provider`.
+- **Status:** Implemented
+- **Dependencies:** Embedding Generation
+
+### Semantic Retrieval
+Top-k cosine similarity search over stored chunk vectors, run in the database against the HNSW index. Configurable `top_k` and similarity floor, scoped by user, restricted to `indexed` documents, with exact-duplicate content collapsed. Results carry document, filename, page and heading, so a citation can be resolved. Not yet exposed over HTTP — that arrives with chat.
+- **Status:** Implemented
+- **Dependencies:** Embedding Generation, Document Models & Migrations
+
+### Dialect-Aware Vector Distance
+A `cosine_distance` construct compiling to pgvector's `<=>` on Postgres and to a registered function on SQLite, so the retrieval query under test is the query that ships.
+- **Status:** Implemented
+- **Dependencies:** Document Models & Migrations
+
+### RAG Chat
+`POST /chat` answers a question using only the caller's indexed documents. Retrieval supplies the context, the registered `rag_answer` prompt constrains the model to it, and the response carries the passages the model was shown. Stateless — no conversation history is kept or consulted.
+- **Status:** Implemented
+- **Dependencies:** Semantic Retrieval, Prompt Registry System, LLM Provider Abstraction
 
 ### Document Management API
 List documents with status filtering and pagination, retrieve one by id including its failure reason, and delete a document with its chunks. `GET /documents`, `GET /documents/{id}`, `DELETE /documents/{id}`.
@@ -37,13 +67,13 @@ SQLAlchemy engine, session factory, and a FastAPI session dependency. SQL echo f
 - **Dependencies:** None
 
 ### LLM Provider Abstraction
-Provider-agnostic chat completions across OpenAI and OpenRouter, selected by configuration. The client is constructed lazily on first use, so importing the package requires no credentials.
-- **Status:** Implemented — **no caller yet**, see note below
+Provider-agnostic chat completions and embeddings across OpenAI and OpenRouter, selected by configuration and cached per provider. Clients are constructed lazily on first use, so importing the package requires no credentials.
+- **Status:** Implemented — both paths now have callers
 - **Dependencies:** None
 
 ### Prompt Registry System
-`PromptTemplate`, `PromptRegistry` and `PromptBuilder`, with two built-in prompts: `assistant` and `ai_shadow` (the retrieval prompt shape).
-- **Status:** Implemented — **no caller yet**
+`PromptTemplate`, `PromptRegistry` and `PromptBuilder`, with two built-in prompts: `rag_answer`, used by chat, and `assistant`, which still has no caller.
+- **Status:** Implemented
 - **Dependencies:** None
 
 ### Analysis Engine
@@ -55,7 +85,7 @@ Runs a registered prompt, calls the LLM, tolerates markdown-fenced JSON, and val
 `GET /health`, `GET /`.
 - **Status:** Implemented
 
-> **On the three "no caller yet" entries.** The LLM layer, prompt system and Analysis Engine were carried over from the reference repository because the next feature — retrieval and cited chat — needs all three, and they are complete and tested rather than placeholder. They are deliberately unused by ingestion. If retrieval is not built, they should be removed rather than left indefinitely.
+> **On the remaining "no caller" entry.** Only the Analysis Engine is left unused. Chat derives its sources from retrieval rather than from validated model output, so nothing currently needs schema-checked JSON — see the RAG Chat decision in `DECISIONS.md`. It earns its place if and when citations move to sentence level; otherwise it should be removed.
 
 ---
 
@@ -67,20 +97,15 @@ None. See [`ROADMAP.md`](ROADMAP.md).
 
 ## Planned
 
-### Embedding Generation
-Populate `document_chunks.embedding` via a provider-agnostic embedding service. Requires no schema change — the column and its index already exist.
+### Sentence-Level Citations
+Attribution of individual claims to specific passages, by having the model cite by index and validating those indices through the Analysis Engine. Today every retrieved passage is returned as a source, including any the model did not use.
 - **Status:** Planned
-- **Dependencies:** LLM Provider Abstraction, Document Models & Migrations
+- **Dependencies:** RAG Chat, Analysis Engine
 
-### Semantic Retrieval
-Top-k similarity search over chunks using pgvector cosine distance, scoped by user and filtered by a similarity floor.
+### Search Endpoint
+`POST /search` exposing retrieval without the model, for debugging relevance.
 - **Status:** Planned
-- **Dependencies:** Embedding Generation
-
-### RAG Chat with Citations
-`POST /chat` answering from retrieved chunks, returning structured citations resolved back to document, page and heading via the Analysis Engine.
-- **Status:** Planned
-- **Dependencies:** Semantic Retrieval, Analysis Engine, Prompt Registry System
+- **Dependencies:** Semantic Retrieval
 
 ### Frontend
 React and Tailwind interface for upload, document management, chat, and source display.

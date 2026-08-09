@@ -20,7 +20,7 @@ HTTP  ──▶  API layer            app/api/
              │
              ▼
            Feature services     app/services/features/
-                                product logic: documents/
+                                product logic: documents/, retrieval/, chat/
              │
              ├──────────────▶   Engines            app/services/engines/
              │                  reusable, domain-agnostic AI capabilities
@@ -62,10 +62,21 @@ POST /documents/upload
    DocumentChunk rows          content, char_count, chunk_index,
         │                      page_number, section_title, embedding=NULL
         ▼
+   embed_document_chunks()    batched provider calls; vectors matched to
+        │                     chunks by the provider's own index
+        │                     ─ failure: status=failed, chunks KEPT, 502
+        ▼
    Document(status=indexed, chunk_count, page_count)   → 201
 ```
 
 The whole pipeline runs inside the request and inside one transaction.
+
+`status="indexed"` means retrievable. A document whose chunks carry no vectors
+is invisible to similarity search, so reporting it as indexed would make an
+unretrievable document indistinguishable from an irrelevant question. Chunks
+survive an embedding failure — unlike a parse failure, the provider outage is
+transient and the parse work is still valid, so recovery is
+`backfill_missing_embeddings` rather than a re-upload.
 
 ### Provenance
 
@@ -96,11 +107,108 @@ updated_at    tstz           │
 
 `status` moves `pending → processing → indexed | failed`.
 
-Two properties of this schema matter more than the rest. The **embedding column and its index already exist**, nullable and unpopulated, so the embedding feature is a data change rather than a migration. And **every row is user-scoped** from the first migration, so introducing authentication changes where `user_id` comes from rather than requiring a backfill.
+Two properties of this schema matter more than the rest. The **embedding column and its index were created up front**, which is why populating them needed no migration — the column is still nullable, and nullable now means "not yet embedded", which is exactly what the backfill looks for. And **every row is user-scoped** from the first migration, so introducing authentication changes where `user_id` comes from rather than requiring a backfill.
 
 ---
 
-## 5. Error handling
+## 5. Retrieval
+
+```
+search(query, top_k, similarity_threshold)
+   │
+   ▼
+reject a blank query                        → EmptyQueryError
+   │
+   ▼
+probe for one eligible chunk                → [] before any provider call
+   │
+   ▼
+EmbeddingService.embed_query(query)         → EmbeddingError propagates
+   │
+   ▼
+ORDER BY embedding <=> :query_vector,       cosine distance, in the database
+         id                                 against the HNSW index
+   │  WHERE user_id = :user
+   │    AND embedding IS NOT NULL
+   │    AND documents.status = 'indexed'
+   │    AND distance IS NOT NULL
+   │    AND distance <= 1 - threshold       (omitted when the floor is off)
+   ▼
+page until top_k unique contents, or the corpus is exhausted
+   ▼
+RetrievedChunk[]  { content, similarity, document_id, filename,
+                    chunk_index, page_number, section_title }
+```
+
+Ranking happens in the database. Loading vectors into the application to sort
+them would ignore the HNSW index and turn every search into a full scan.
+
+**The metric is cosine similarity**, reported to callers as `1 - distance` in
+`[-1, 1]`. The HNSW index is built `USING hnsw (embedding vector_cosine_ops)`,
+and an index only serves the operator class it was built for — so L2 (`<->`)
+would still return correct answers while silently dropping to a sequential
+scan. Cosine is also magnitude-invariant, which keeps a long chunk from
+outranking a short one on norm alone, and its bounded range makes the
+configurable floor a number a human can reason about. Changing the metric means
+changing the index. See [`DECISIONS.md`](DECISIONS.md).
+
+The floor is configurable and can be disabled — per call with
+`similarity_threshold=None`, or globally by leaving
+`RETRIEVAL_SIMILARITY_THRESHOLD` empty. Deduplication pages further down the
+ranking rather than over-fetching a fixed multiple, so collapsing repeated
+boilerplate never returns fewer chunks than were asked for.
+
+`<=>` is a pgvector operator, and the suite runs on SQLite. Rather than write
+two queries, `app/database/vector.py` defines one `cosine_distance` construct
+that compiles to `<=>` on Postgres and to a registered function on SQLite — and
+an opt-in test (`pytest -m postgres`) asserts the two agree. See
+[`DECISIONS.md`](DECISIONS.md).
+
+Retrieval knows nothing about prompts, chat or citations. It returns chunks and
+their provenance; assembling those into an answer is the next layer's job.
+
+---
+
+## 6. Chat
+
+```
+POST /chat  { question, top_k? }
+   │
+   ▼
+ChatRequest validation                      blank question → 422
+   │
+   ▼
+retrieval_service.search(question, top_k)   §5
+   │
+   ├── no passages ──▶ 200, fixed "nothing found" answer,
+   │                   retrieved_chunks: 0, model NOT called
+   ▼
+PromptBuilder.build(registry["rag_answer"],
+                    context=numbered passages, question=...)
+   │
+   ▼
+llm_service.complete(messages)              provider failure → 502
+   │
+   ▼
+{ answer, sources[], retrieved_chunks }
+```
+
+`ChatService` is orchestration and nothing else: no similarity arithmetic, no
+prompt text, no provider knowledge. Each of those already belongs to a layer
+below it, and chat composes them.
+
+**Sources are the retrieved passages**, not something the model reports. The
+model cannot name a document that was not fetched, so a source cannot be
+fabricated. The price is that attribution is per-request rather than
+per-sentence — every retrieved passage is listed, including any the model did
+not use. See [`DECISIONS.md`](DECISIONS.md).
+
+Stateless. No conversation history is stored or consulted; each question is
+answered from the documents alone.
+
+---
+
+## 7. Error handling
 
 Services raise domain exceptions from `app/core/exceptions.py`. They know nothing about HTTP. Exception handlers registered in `app/main.py` map them:
 
@@ -111,19 +219,20 @@ Services raise domain exceptions from `app/core/exceptions.py`. They know nothin
 | `UnsupportedDocumentTypeError` | 415 |
 | `EmptyDocumentError`, `DocumentParseError` | 422 |
 | any other `DocumentError` | 400 |
-| `AnalysisValidationError`, `LLMServiceError` | 502 |
+| `RetrievalError`, `EmptyQueryError` | 422 |
+| `AnalysisValidationError`, `LLMServiceError`, `EmbeddingError` | 502 |
 
 Every mapped error returns `{"detail": "...", "error": "ExceptionClassName"}`.
 
 ---
 
-## 6. Configuration
+## 8. Configuration
 
 All settings come from environment variables through `app/config/settings.py`, and every one has a working default so the package imports without a `.env`. Nothing reads `os.environ` directly.
 
 ---
 
-## 7. Testing
+## 9. Testing
 
 The test tree mirrors the application tree. Tests run against in-memory SQLite with no services and no credentials: the embedding column is declared with a JSON variant for SQLite, so the same models create cleanly in both dialects.
 
@@ -131,19 +240,16 @@ Parsing and chunking are tested as pure functions over generated fixture documen
 
 ---
 
-## 8. Planned: retrieval and cited chat
+## 10. Planned: sentence-level citations
 
-*(Not implemented. Sketched here because the schema above was shaped by it.)*
+*(Not implemented. The retrieval half of this now exists — see §5.)*
 
 ```
 POST /chat
    │
    ▼
-embed the question ─────────▶ embedding service (planned)
+retrieval_service.search(question)  ────────▶ exists (§5)
    │
-   ▼
-similarity search over document_chunks.embedding
-   │  cosine distance, scoped by user_id, above a similarity floor
    ▼
 top-k chunks with their page_number and section_title
    │
@@ -161,7 +267,7 @@ The Analysis Engine already does the hard part: it forces the model's output thr
 
 ---
 
-## 9. Technology
+## 11. Technology
 
 | Layer | Choice |
 |---|---|
@@ -172,6 +278,7 @@ The Analysis Engine already does the hard part: it forces the model's output thr
 | Parsing | pypdf, python-docx |
 | Chunking | langchain-text-splitters |
 | LLM | OpenAI SDK against OpenAI or OpenRouter |
+| Embeddings | Same SDK; provider selectable independently of completions |
 | Testing | pytest, SQLite in-memory |
 | Lint & format | ruff |
 | Frontend *(planned)* | React, Tailwind |
