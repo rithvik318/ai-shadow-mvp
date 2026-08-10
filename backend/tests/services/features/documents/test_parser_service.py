@@ -11,6 +11,7 @@ from app.core.exceptions import (
     UnsupportedDocumentTypeError,
 )
 from app.services.features.documents.parser_service import (
+    _MAX_HEADER_CELL_LENGTH,
     MAX_SECTION_TITLE_LENGTH,
     parse_document,
     resolve_format,
@@ -797,6 +798,137 @@ def test_parse_docx_counts_a_wrapped_run_as_a_heading() -> None:
 
     assert parsed.sections[0].section_title == "Executive Summary"
     assert parsed.sections[0].text == "Body text."
+
+
+# --- table header detection ----------------------------------------------
+
+
+def test_parse_docx_treats_a_prose_first_row_as_data_not_headers() -> None:
+    """A page laid out as a table is not a table of data.
+
+    Read as headers, the first row's prose becomes a prefix on the rows below
+    and any column with no cell beneath it is dropped entirely.
+    """
+
+    left = "The Challenge. " * 30
+    right = "How it works. " * 30
+    data = build_docx_blocks([("table", [[left, right], ["Call to action.", ""]])])
+
+    parsed = parse_document(data, "layout.docx", DOCX_TYPE)
+    text = parsed.sections[0].text
+
+    assert left.strip() in text
+    assert right.strip() in text
+    assert "Call to action." in text
+    assert ": " not in text.split("\n")[0]
+
+
+def test_parse_docx_keeps_the_whitepaper_second_column() -> None:
+    """The real regression: 1,956 characters of one column went missing.
+
+    `Sun Radia Whitepaper_Banking_Financial_Services.docx` lays its article
+    out as a two-column table whose second row holds a single call-to-action
+    cell. With row 0 read as headers, column 1 had nothing to attach to and
+    was never emitted.
+    """
+
+    challenge = "The Challenge Financial institutions operate under a paradox. " * 36
+    how = (
+        "HOW IT WORKS 1 INPUT INGESTION Any inbound channel is parsed. "
+        "2 INTELLIGENT PLAN MATCHING The platform reads intent. "
+        "3 AGENTIC WORKFLOW EXECUTION Agents verify documents. "
+        "4 DYNAMIC TOOL SELECTION Sub-agents are spawned as needed. " * 8
+    )
+    data = build_docx_blocks(
+        [("table", [[challenge, how], ["Ready to automate your SOPs?", ""]])]
+    )
+
+    parsed = parse_document(data, "whitepaper.docx", DOCX_TYPE)
+    text = parsed.text
+
+    for phrase in (
+        "HOW IT WORKS",
+        "INPUT INGESTION",
+        "INTELLIGENT PLAN MATCHING",
+        "AGENTIC WORKFLOW EXECUTION",
+        "DYNAMIC TOOL SELECTION",
+    ):
+        assert phrase in text
+
+    assert how.strip() in text
+    assert challenge.strip() in text
+
+
+def test_parse_docx_keeps_a_header_cell_at_the_length_limit() -> None:
+    """A label exactly at the bound is still a label."""
+
+    label = "H" * _MAX_HEADER_CELL_LENGTH
+    data = build_docx_blocks([("table", [[label, "Role"], ["Ann", "Lead"]])])
+
+    parsed = parse_document(data, "boundary.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == f"{label}: Ann | Role: Lead"
+
+
+def test_parse_docx_rejects_a_header_cell_one_character_over() -> None:
+    """One character past the bound and the row is data, not headers."""
+
+    label = "H" * (_MAX_HEADER_CELL_LENGTH + 1)
+    data = build_docx_blocks([("table", [[label, "Role"], ["Ann", "Lead"]])])
+
+    parsed = parse_document(data, "boundary.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == f"{label} | Role\nAnn | Lead"
+
+
+def test_parse_docx_rejects_the_header_when_any_cell_is_too_long() -> None:
+    """The test is over every label, not the first or the average."""
+
+    long_label = "L" * (_MAX_HEADER_CELL_LENGTH + 50)
+    data = build_docx_blocks(
+        [("table", [["Short", "Also short", long_label], ["a", "b", "c"]])]
+    )
+
+    parsed = parse_document(data, "mixed.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == f"Short | Also short | {long_label}\na | b | c"
+
+
+def test_parse_docx_ordinary_table_output_is_unchanged() -> None:
+    """The shape almost every real table has must be byte-identical."""
+
+    data = build_docx_blocks([("table", [["Name", "Role"], ["Ann", "Lead architect"]])])
+
+    parsed = parse_document(data, "normal.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "Name: Ann | Role: Lead architect"
+
+
+def test_parse_docx_still_omits_a_label_whose_column_is_empty() -> None:
+    """Deliberately unchanged: a label with no value is not worth emitting.
+
+    Tracked separately from the header-length problem; a bare `Release Date:`
+    would add noise without adding meaning.
+    """
+
+    data = build_docx_blocks([("table", [["S. No.", "Release Date"], ["1", ""]])])
+
+    parsed = parse_document(data, "irregular.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "S. No.: 1"
+
+
+def test_docx_and_pptx_serialise_a_long_prose_table_identically() -> None:
+    """The serialiser stays shared: both formats take the same fallback."""
+
+    grid = [["Prose. " * 40, "More prose. " * 40], ["Tail cell", ""]]
+
+    from_docx = parse_document(
+        build_docx_blocks([("table", grid)]), "d.docx", DOCX_TYPE
+    )
+    from_pptx = parse_document(build_pptx([{"table": grid}]), "d.pptx", PPTX_TYPE)
+
+    assert from_docx.sections[0].text == from_pptx.sections[0].text
 
 
 # --- PPTX ----------------------------------------------------------------

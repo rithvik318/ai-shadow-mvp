@@ -60,6 +60,16 @@ _RUN_TAG = qn("w:r")
 MAX_SECTION_TITLE_LENGTH = 200
 
 
+# A header cell is a label. Authors also build page layouts out of tables, and
+# a first row holding paragraphs of prose is a layout, not a header — reading
+# it as one attaches the prose to the rows below as a prefix and drops any
+# column with no cell beneath it. Measured across the corpus's 90 header-like
+# DOCX tables, 87 have a longest header cell of 64 characters or less and the
+# longest genuine one is 64; the next three are 137, 191 and 2266, and all
+# three are prose laid out in a grid. 200 sits in that gap.
+_MAX_HEADER_CELL_LENGTH = 200
+
+
 def _bounded_title(title: str | None) -> str | None:
     """Return a heading trimmed to the length a title column can hold."""
 
@@ -311,10 +321,10 @@ def _serialise_rows(rows: list[list[str]]) -> str:
     closer to prose than pipe-delimited columns, and reads naturally when the
     model receives it as context.
 
-    Tables with no usable header — a single row, a single column, or a first
-    row that does not look like labels — fall back to plain delimited rows,
-    which is the right shape for the layout tables authors use for formatting
-    rather than data.
+    Tables with no usable header — a single row, a single column, a first row
+    that does not look like labels, or one whose cells are too long to be
+    labels at all — fall back to plain delimited rows, which is the right
+    shape for the layout tables authors use for formatting rather than data.
 
     Takes rows rather than a table object so DOCX and PPTX tables reach the
     reader in one format. Only the extraction of cell text differs between
@@ -326,7 +336,12 @@ def _serialise_rows(rows: list[list[str]]) -> str:
 
     header = rows[0]
     labels = [cell for cell in header if cell]
-    has_header = len(rows) > 1 and len(labels) >= 2 and len(set(labels)) == len(labels)
+    has_header = (
+        len(rows) > 1
+        and len(labels) >= 2
+        and len(set(labels)) == len(labels)
+        and all(len(label) <= _MAX_HEADER_CELL_LENGTH for label in labels)
+    )
 
     if not has_header:
         return "\n".join(" | ".join(cell for cell in row if cell) for row in rows)
