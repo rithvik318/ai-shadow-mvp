@@ -27,7 +27,7 @@ A one-shot live call reporting the configured provider, model and returned width
 - **Dependencies:** Embedding Generation
 
 ### Semantic Retrieval
-Top-k cosine similarity search over stored chunk vectors, run in the database against the HNSW index. Configurable `top_k` and similarity floor, scoped by user, restricted to `indexed` documents, with exact-duplicate content collapsed. Results carry document, filename, page and heading, so a citation can be resolved. Not yet exposed over HTTP — that arrives with chat.
+Top-k cosine similarity search over stored chunk vectors, run in the database against the HNSW index. Configurable `top_k` and similarity floor, scoped by user, restricted to `indexed` documents, with duplicate content collapsed on a whitespace- and case-insensitive fingerprint, so the same passage under two filenames does not take two of the slots a caller asked for. Results carry document, filename, page and heading, so a citation can be resolved. Reached over HTTP through `POST /chat`.
 - **Status:** Implemented
 - **Dependencies:** Embedding Generation, Document Models & Migrations
 
@@ -36,8 +36,8 @@ A `cosine_distance` construct compiling to pgvector's `<=>` on Postgres and to a
 - **Status:** Implemented
 - **Dependencies:** Document Models & Migrations
 
-### RAG Chat
-`POST /chat` answers a question using only the caller's indexed documents. Retrieval supplies the context, the registered `rag_answer` prompt constrains the model to it, and the response carries the passages the model was shown. Stateless — no conversation history is kept or consulted.
+### RAG Chat with Citations
+`POST /chat` answers a question using only the caller's indexed documents. Retrieval supplies the context, which is assembled into delimited `[SOURCE n]` blocks naming the document, section and page of each passage; the registered `rag_answer` prompt constrains the model to those passages and instructs it to cite them by identifier. The response carries each passage as `document`, `section`, `page` and `similarity`. Context is bounded by `CHAT_CONTEXT_MAX_CHARS` — passages dropped for budget are not reported as sources, because the model never saw them. Stateless: no conversation history is kept or consulted.
 - **Status:** Implemented
 - **Dependencies:** Semantic Retrieval, Prompt Registry System, LLM Provider Abstraction
 

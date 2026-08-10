@@ -24,9 +24,13 @@ RAG_ANSWER_PROMPT = PromptTemplate(
         "3. If the context does not answer the question, say so plainly and "
         "stop. Do not guess, and do not present a partial answer as a complete "
         "one.\n"
-        "4. Where several passages bear on the question, synthesise them into "
+        "4. Cite the passages you used by their identifier, as [SOURCE 1] or "
+        "[SOURCE 1][SOURCE 3], immediately after the statement they support.\n"
+        "5. Never attribute to a source something it does not say. If two "
+        "passages disagree, report the disagreement and cite both.\n"
+        "6. Where several passages bear on the question, synthesise them into "
         "one coherent answer rather than summarising each in turn.\n"
-        "5. Be concise, but never at the cost of a condition, exception or "
+        "7. Be concise, but never at the cost of a condition, exception or "
         "qualification the context attaches to the answer."
     ),
     user_prompt="Context:\n{context}\n\nQuestion:\n{question}",

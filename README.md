@@ -154,13 +154,22 @@ curl -X POST http://localhost:8000/chat \
 {
   "answer": "Holiday accrues at two days per month, pro-rated for part-time staff.",
   "sources": [
-    { "document_id": "9f1c2b6e-...", "filename": "handbook.pdf", "page_number": 12, "similarity": 0.91 }
+    {
+      "document": "handbook.pdf",
+      "section": "Leave and Absence",
+      "page": 12,
+      "similarity": 0.91,
+      "document_id": "9f1c2b6e-...",
+      "chunk_id": "3a77e410-..."
+    }
   ],
   "retrieved_chunks": 3
 }
 ```
 
-`sources` are the passages actually put in front of the model, so they cannot be invented — the model has no way to name a document that was not retrieved. The trade-off is that every retrieved passage is listed, including any the answer did not draw on.
+`page` carries whichever ordinal the format has — a page for PDF, a slide number for PPTX. DOCX has neither without rendering the file, so it is `null` there and `section` names the heading instead.
+
+`sources` are the passages actually put in front of the model, so they cannot be invented — the model has no way to name a document that was not retrieved. A passage dropped because the context budget (`CHAT_CONTEXT_MAX_CHARS`) was reached is not listed either, since the model never saw it. The trade-off is that every passage that *was* shown is listed, including any the answer did not draw on.
 
 When nothing relevant is found the endpoint returns `200` with `retrieved_chunks: 0`, an empty `sources`, and an answer saying so — and no model call is made. Check `retrieved_chunks`, not the prose, to tell that apart from a grounded answer.
 

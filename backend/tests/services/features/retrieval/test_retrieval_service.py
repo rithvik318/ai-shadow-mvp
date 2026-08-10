@@ -569,3 +569,30 @@ def test_every_result_carries_the_full_metadata_contract(
     assert result.content == "east"
     assert result.chunk_index == 0
     assert result.section_title == "Compass Points"
+
+
+def test_near_identical_content_is_returned_once(
+    db_session: Session, embed_query_as
+) -> None:
+    """The corpus keeps the same passage under several filenames and revisions.
+
+    Two copies differing only by whitespace or capitalisation are the same
+    passage, and both taking a slot would spend a top-5 on one answer.
+    """
+
+    embed_query_as(EAST)
+    _seed(
+        db_session,
+        [
+            ("Data Governance Framework", EAST),
+            ("data  governance   framework", NORTH_EAST),
+            ("A genuinely different passage", NORTH),
+        ],
+    )
+
+    results = search(db_session, "east", top_k=2)
+
+    assert [result.content for result in results] == [
+        "Data Governance Framework",
+        "A genuinely different passage",
+    ]

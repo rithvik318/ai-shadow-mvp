@@ -175,10 +175,10 @@ def test_context_passages_are_numbered_and_attributed(
     answer_question(db_session, "q?")
 
     user_message = calls[0][1]["content"]
-    assert "[1] handbook.pdf, page 3" in user_message
-    assert "[2] handbook.pdf, page 3" in user_message
-    assert "First passage." in user_message
-    assert "Second passage." in user_message
+    assert "[SOURCE 1]\nDocument: handbook.pdf\nPage: 3" in user_message
+    assert "[SOURCE 2]\nDocument: handbook.pdf\nPage: 3" in user_message
+    assert "Content: First passage." in user_message
+    assert "Content: Second passage." in user_message
 
 
 def test_a_passage_without_a_page_falls_back_to_its_heading(
@@ -195,8 +195,16 @@ def test_a_passage_without_a_page_falls_back_to_its_heading(
         page_number=None,
         section_title="Leave",
     )
-    answer_question(db_session, "q?")
-    assert "[1] policy.docx, section 'Leave'" in calls[0][1]["content"]
+
+    result = answer_question(db_session, "q?")
+
+    user_message = calls[0][1]["content"]
+    assert "[SOURCE 1]\nDocument: policy.docx\nSection: Leave" in user_message
+    assert "Page:" not in user_message
+    # The same fallback has to survive as far as the caller, not just into the
+    # prompt: a DOCX citation names a heading because it has nothing else.
+    assert result.sources[0].section_title == "Leave"
+    assert result.sources[0].page_number is None
 
 
 def test_the_question_reaches_the_model(
@@ -223,8 +231,7 @@ def test_no_retrieved_chunks_answers_honestly(
     fake_llm("should not be used")
     _seed(db_session, [("unrelated", NORTH)])
 
-    result = answer_question(db_session, "q?", top_k=5,
-                             similarity_threshold=0.99)
+    result = answer_question(db_session, "q?", top_k=5, similarity_threshold=0.99)
 
     assert result.answer == NO_CONTEXT_ANSWER
     assert result.sources == []
@@ -342,3 +349,49 @@ def test_an_llm_failure_propagates(
 
     with pytest.raises(LLMServiceError):
         answer_question(db_session, "q?")
+
+
+def test_source_metadata_reaches_the_caller(
+    db_session: Session, embed_query_as, fake_llm
+) -> None:
+    """A citation is only useful if it names where the passage came from."""
+
+    embed_query_as(EAST)
+    fake_llm("An answer.")
+    _seed(
+        db_session,
+        [("Slide body.", EAST)],
+        filename="deck.pptx",
+        page_number=7,
+        section_title="Our Approach",
+    )
+
+    source = answer_question(db_session, "q?").sources[0]
+
+    assert source.filename == "deck.pptx"
+    assert source.page_number == 7
+    assert source.section_title == "Our Approach"
+    assert source.similarity == pytest.approx(1.0)
+
+
+def test_sources_list_only_the_passages_the_model_saw(
+    db_session: Session, embed_query_as, fake_llm, monkeypatch
+) -> None:
+    """A passage dropped for context budget must not be reported as a source.
+
+    Listing it would claim the answer drew on something the model was never
+    shown, which is the one guarantee `sources` exists to make.
+    """
+
+    from app.config import settings as settings_module
+
+    monkeypatch.setattr(settings_module.settings, "CHAT_CONTEXT_MAX_CHARS", 120)
+    embed_query_as(EAST)
+    calls = fake_llm("An answer.")
+    _seed(db_session, [("A" * 100, EAST), ("B" * 100, NORTH_EAST)])
+
+    result = answer_question(db_session, "q?")
+
+    assert result.retrieved_chunks == 1
+    assert len(result.sources) == 1
+    assert "B" * 100 not in calls[0][1]["content"]

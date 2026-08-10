@@ -26,12 +26,14 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.config.settings import settings
 from app.core.constants import MVP_USER_ID
 from app.core.exceptions import EmptyQueryError
 from app.prompts.builder import PromptBuilder
 from app.prompts.registry import PromptRegistry
+from app.services.features.chat.context_service import build_context
 from app.services.features.retrieval import retrieval_service
-from app.services.features.retrieval.retrieval_service import UNSET, RetrievedChunk
+from app.services.features.retrieval.retrieval_service import UNSET
 from app.services.llm.llm_service import llm_service
 
 logger = logging.getLogger(__name__)
@@ -65,30 +67,6 @@ class ChatAnswer:
     answer: str
     sources: list[ChatSource]
     retrieved_chunks: int
-
-
-def _format_context(chunks: list[RetrievedChunk]) -> str:
-    """Render retrieved chunks as numbered, attributed passages.
-
-    Each passage is labelled with its document and, where the format has one,
-    its page — so the model can distinguish two passages that say similar
-    things, and can qualify an answer that holds in one document but not
-    another.
-    """
-
-    passages: list[str] = []
-
-    for position, chunk in enumerate(chunks, start=1):
-        location = chunk.filename
-
-        if chunk.page_number is not None:
-            location = f"{location}, page {chunk.page_number}"
-        elif chunk.section_title:
-            location = f"{location}, section {chunk.section_title!r}"
-
-        passages.append(f"[{position}] {location}\n{chunk.content}")
-
-    return "\n\n".join(passages)
 
 
 def answer_question(
@@ -128,9 +106,21 @@ def answer_question(
         )
         return ChatAnswer(answer=NO_CONTEXT_ANSWER, sources=[], retrieved_chunks=0)
 
+    context = build_context(chunks, max_chars=settings.CHAT_CONTEXT_MAX_CHARS)
+
+    if len(context.chunks) < len(chunks):
+        logger.info(
+            "chat_context_truncated",
+            extra={
+                "user_id": user_id,
+                "retrieved_chunks": len(chunks),
+                "chunks_in_context": len(context.chunks),
+            },
+        )
+
     messages = PromptBuilder.build(
         PromptRegistry.get(RAG_PROMPT_NAME),
-        context=_format_context(chunks),
+        context=context.text,
         question=question.strip(),
     )
 
@@ -142,7 +132,7 @@ def answer_question(
         "chat_answered",
         extra={
             "user_id": user_id,
-            "retrieved_chunks": len(chunks),
+            "retrieved_chunks": len(context.chunks),
             "llm_duration_ms": round(llm_ms, 2),
             "answer_length": len(answer),
         },
@@ -159,7 +149,7 @@ def answer_question(
                 page_number=chunk.page_number,
                 section_title=chunk.section_title,
             )
-            for chunk in chunks
+            for chunk in context.chunks
         ],
-        retrieved_chunks=len(chunks),
+        retrieved_chunks=len(context.chunks),
     )

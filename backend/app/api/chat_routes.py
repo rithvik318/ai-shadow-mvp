@@ -39,7 +39,15 @@ def ask(
     return ChatResponse(
         answer=answer.answer,
         sources=[
-            ChatSourceResponse.model_validate(source) for source in answer.sources
+            ChatSourceResponse(
+                document=source.filename,
+                section=source.section_title,
+                page=source.page_number,
+                similarity=source.similarity,
+                document_id=source.document_id,
+                chunk_id=source.chunk_id,
+            )
+            for source in answer.sources
         ],
         retrieved_chunks=answer.retrieved_chunks,
     )

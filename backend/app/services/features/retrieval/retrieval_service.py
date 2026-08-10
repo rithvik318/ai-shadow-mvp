@@ -109,6 +109,17 @@ def _validate(top_k: int, threshold: float | None) -> None:
         )
 
 
+def _fingerprint(content: str) -> str:
+    """Collapse a passage to what makes it the same passage as another.
+
+    Whitespace and case only. Anything cleverer — stripping punctuation,
+    stemming — would start merging passages that genuinely differ, and a
+    wrongly discarded passage is invisible in the answer.
+    """
+
+    return " ".join(content.split()).casefold()
+
+
 def _corpus_has_embeddings(db: Session, user_id: str) -> bool:
     """Whether this user has any chunk that could be searched at all."""
 
@@ -197,6 +208,10 @@ def search(
 
     results: list[RetrievedChunk] = []
     seen_content: set[str] = set()
+    # Matching on normalised text rather than the stored string: the corpus
+    # carries the same document under several filenames and revisions, and two
+    # copies of a passage differing only by whitespace or capitalisation would
+    # otherwise both take a place in a top-5 that has five places.
     page_size = max(effective_top_k * 2, 10)
     ceiling = max(effective_top_k * _MAX_CANDIDATE_MULTIPLIER, _MIN_CANDIDATE_CEILING)
     examined = 0
@@ -218,10 +233,12 @@ def search(
         examined += len(rows)
 
         for chunk, filename, chunk_distance in rows:
-            if chunk.content in seen_content:
+            fingerprint = _fingerprint(chunk.content)
+
+            if fingerprint in seen_content:
                 continue
 
-            seen_content.add(chunk.content)
+            seen_content.add(fingerprint)
             results.append(
                 RetrievedChunk(
                     chunk_id=chunk.id,

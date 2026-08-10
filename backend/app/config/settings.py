@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     # must clear. The floor defaults to 0.0 — orthogonal or better — because a
     # useful value can only be chosen against real documents; see docs/ROADMAP.md.
     # Set to None (an empty value in .env) to disable filtering entirely.
+    # How much retrieved text is rendered into the prompt. Bounds the
+    # request when several long passages are retrieved at once; the least
+    # relevant are dropped first, and a dropped passage is not reported as
+    # a source because the model never saw it.
+    CHAT_CONTEXT_MAX_CHARS: int = 12000
+
     RETRIEVAL_TOP_K: int = 5
     RETRIEVAL_SIMILARITY_THRESHOLD: float | None = 0.0
 

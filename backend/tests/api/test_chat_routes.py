@@ -67,12 +67,15 @@ def test_ask_returns_an_answer_with_sources(
     assert body["retrieved_chunks"] == 1
     assert body["sources"] == [
         {
-            "document_id": str(document.id),
-            "filename": "handbook.pdf",
-            "page_number": 12,
+            "document": "handbook.pdf",
+            "section": None,
+            "page": 12,
             "similarity": pytest.approx(1.0),
+            "document_id": str(document.id),
+            "chunk_id": body["sources"][0]["chunk_id"],
         }
     ]
+    uuid.UUID(body["sources"][0]["chunk_id"])
 
 
 def test_sources_are_ordered_most_similar_first(
@@ -154,7 +157,7 @@ def test_an_uploaded_document_can_be_asked_about(
 
     assert body["answer"] == "Two days a month."
     assert body["retrieved_chunks"] == 1
-    assert body["sources"][0]["filename"] == "notes.txt"
+    assert body["sources"][0]["document"] == "notes.txt"
     uuid.UUID(body["sources"][0]["document_id"])
 
 
