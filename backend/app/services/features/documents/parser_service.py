@@ -50,6 +50,35 @@ _NOT_PARAGRAPH_TEXT = frozenset(
 
 _RUN_TAG = qn("w:r")
 
+# `section_title` is a display and citation label, never embedded and never
+# searched, so it is bounded — while the heading it came from is kept whole in
+# the section's own text. The bound also keeps a heading out of the chunk
+# column it would overflow: `DocumentChunk.section_title` is `String(512)`,
+# which PostgreSQL enforces and SQLite does not, so an over-long heading would
+# fail an ingest that every test passes. 200 leaves 322 of the 323 titles in
+# the SunRadia corpus untouched — the median is 28 and the 99th percentile 91.
+MAX_SECTION_TITLE_LENGTH = 200
+
+
+# A header cell is a label. Authors also build page layouts out of tables, and
+# a first row holding paragraphs of prose is a layout, not a header — reading
+# it as one attaches the prose to the rows below as a prefix and drops any
+# column with no cell beneath it. Measured across the corpus's 90 header-like
+# DOCX tables, 87 have a longest header cell of 64 characters or less and the
+# longest genuine one is 64; the next three are 137, 191 and 2266, and all
+# three are prose laid out in a grid. 200 sits in that gap.
+_MAX_HEADER_CELL_LENGTH = 200
+
+
+def _bounded_title(title: str | None) -> str | None:
+    """Return a heading trimmed to the length a title column can hold."""
+
+    if title is None:
+        return None
+
+    return title[:MAX_SECTION_TITLE_LENGTH]
+
+
 # What a run's non-text children stand for, matching `Run.text`. Without these
 # a tab between two words closes up and welds them into one token.
 _RUN_SEPARATORS = {qn("w:tab"): "\t", qn("w:br"): "\n", qn("w:cr"): "\n"}
@@ -292,10 +321,10 @@ def _serialise_rows(rows: list[list[str]]) -> str:
     closer to prose than pipe-delimited columns, and reads naturally when the
     model receives it as context.
 
-    Tables with no usable header — a single row, a single column, or a first
-    row that does not look like labels — fall back to plain delimited rows,
-    which is the right shape for the layout tables authors use for formatting
-    rather than data.
+    Tables with no usable header — a single row, a single column, a first row
+    that does not look like labels, or one whose cells are too long to be
+    labels at all — fall back to plain delimited rows, which is the right
+    shape for the layout tables authors use for formatting rather than data.
 
     Takes rows rather than a table object so DOCX and PPTX tables reach the
     reader in one format. Only the extraction of cell text differs between
@@ -307,7 +336,12 @@ def _serialise_rows(rows: list[list[str]]) -> str:
 
     header = rows[0]
     labels = [cell for cell in header if cell]
-    has_header = len(rows) > 1 and len(labels) >= 2 and len(set(labels)) == len(labels)
+    has_header = (
+        len(rows) > 1
+        and len(labels) >= 2
+        and len(set(labels)) == len(labels)
+        and all(len(label) <= _MAX_HEADER_CELL_LENGTH for label in labels)
+    )
 
     if not has_header:
         return "\n".join(" | ".join(cell for cell in row if cell) for row in rows)
@@ -363,16 +397,54 @@ def _parse_docx(data: bytes) -> ParsedDocument:
     sections: list[ParsedSection] = []
     current_title: str | None = None
     buffer: list[str] = []
+    title_carried = False
 
     def flush() -> None:
+        nonlocal title_carried
+
         body = "\n".join(buffer).strip()
         if body:
-            sections.append(ParsedSection(text=body, section_title=current_title))
+            sections.append(
+                ParsedSection(text=body, section_title=_bounded_title(current_title))
+            )
+            title_carried = True
         buffer.clear()
 
     def emit(text: str) -> None:
+        nonlocal title_carried
+
         flush()
-        sections.append(ParsedSection(text=text, section_title=current_title))
+        sections.append(
+            ParsedSection(text=text, section_title=_bounded_title(current_title))
+        )
+        title_carried = True
+
+    def close_title() -> None:
+        """Finish the current heading before it is replaced or the file ends.
+
+        A heading only survives as the `section_title` of a section emitted
+        after it. Left alone, a heading followed straight by another heading —
+        or one ending the document — is overwritten and its text is gone, with
+        nothing failing to show for it. Where that would happen the heading
+        becomes its own section instead, which is also what the PPTX parser
+        does with a slide title that has no other content beside it.
+
+        Only when nothing else carried it: a heading above a table or a text
+        box is already that section's title, and repeating it would restate
+        the same words twice.
+        """
+
+        nonlocal title_carried
+
+        flush()
+
+        if current_title is not None and not title_carried:
+            sections.append(
+                ParsedSection(
+                    text=current_title, section_title=_bounded_title(current_title)
+                )
+            )
+            title_carried = True
 
     for block in blocks:
         if isinstance(block, Table):
@@ -385,8 +457,19 @@ def _parse_docx(data: bytes) -> ParsedDocument:
         if text:
             style_name = (block.style.name or "") if block.style else ""
             if style_name.lower().startswith("heading") or style_name == "Title":
-                flush()
+                close_title()
                 current_title = text
+                title_carried = False
+
+                # A heading too long to fit the label has to become content in
+                # its own right, or bounding the label would be the thing that
+                # loses it. Authors style whole paragraphs as headings, and
+                # the corpus's longest is 636 characters of contract prose.
+                if len(text) > MAX_SECTION_TITLE_LENGTH:
+                    sections.append(
+                        ParsedSection(text=text, section_title=_bounded_title(text))
+                    )
+                    title_carried = True
             else:
                 buffer.append(text)
 
@@ -395,7 +478,7 @@ def _parse_docx(data: bytes) -> ParsedDocument:
         for box in _text_box_blocks(block._p):
             emit(box)
 
-    flush()
+    close_title()
     return ParsedDocument(sections=sections, page_count=None)
 
 
@@ -584,7 +667,11 @@ def _parse_pptx(data: bytes) -> ParsedDocument:
 
         if text := "\n".join(blocks).strip():
             sections.append(
-                ParsedSection(text=text, page_number=number, section_title=title)
+                ParsedSection(
+                    text=text,
+                    page_number=number,
+                    section_title=_bounded_title(title),
+                )
             )
 
     return ParsedDocument(sections=sections, page_count=len(slides))

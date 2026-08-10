@@ -11,6 +11,8 @@ from app.core.exceptions import (
     UnsupportedDocumentTypeError,
 )
 from app.services.features.documents.parser_service import (
+    _MAX_HEADER_CELL_LENGTH,
+    MAX_SECTION_TITLE_LENGTH,
     parse_document,
     resolve_format,
 )
@@ -448,6 +450,232 @@ def test_parse_docx_rejects_a_document_of_only_empty_tables() -> None:
         parse_document(data, "blank-table.docx", DOCX_TYPE)
 
 
+# --- DOCX headings with no body beneath them -----------------------------
+
+
+def test_parse_docx_keeps_a_heading_superseded_by_another_heading() -> None:
+    """A heading only ever survived as the title of a later section.
+
+    Two headings in a row overwrote the first before anything carried it, and
+    nothing failed to show for it.
+    """
+
+    data = build_docx_blocks(
+        [("heading", "Heading A"), ("heading", "Heading B"), ("paragraph", "Body B")]
+    )
+
+    parsed = parse_document(data, "headings.docx", DOCX_TYPE)
+
+    assert [(s.section_title, s.text) for s in parsed.sections] == [
+        ("Heading A", "Heading A"),
+        ("Heading B", "Body B"),
+    ]
+
+
+def test_parse_docx_keeps_every_heading_in_a_run_of_three() -> None:
+    """Each superseded heading becomes its own section, in document order."""
+
+    data = build_docx_blocks(
+        [
+            ("heading", "Heading A"),
+            ("heading", "Heading B"),
+            ("heading", "Heading C"),
+            ("paragraph", "Body C"),
+        ]
+    )
+
+    parsed = parse_document(data, "headings.docx", DOCX_TYPE)
+
+    assert [s.text for s in parsed.sections] == ["Heading A", "Heading B", "Body C"]
+
+
+def test_parse_docx_accepts_a_document_that_is_only_a_heading() -> None:
+    """A heading with nothing after it used to yield no sections at all.
+
+    The document was then rejected as empty, so a file full of visible text
+    was recorded as failed with no explanation.
+    """
+
+    parsed = parse_document(
+        build_docx_blocks([("heading", "Statement of Work")]), "h.docx", DOCX_TYPE
+    )
+
+    assert [(s.section_title, s.text) for s in parsed.sections] == [
+        ("Statement of Work", "Statement of Work")
+    ]
+
+
+def test_parse_docx_keeps_a_trailing_heading() -> None:
+    """A heading ending the document is preserved after the body above it."""
+
+    data = build_docx_blocks([("paragraph", "Body A"), ("heading", "Heading B")])
+
+    parsed = parse_document(data, "trailing.docx", DOCX_TYPE)
+
+    assert [(s.section_title, s.text) for s in parsed.sections] == [
+        (None, "Body A"),
+        ("Heading B", "Heading B"),
+    ]
+
+
+def test_parse_docx_does_not_repeat_a_heading_that_titles_a_table() -> None:
+    """A table already carries the heading above it, so it is not restated."""
+
+    data = build_docx_blocks(
+        [
+            ("heading", "Heading A"),
+            ("table", [["K", "V"], ["k1", "v1"]]),
+            ("heading", "Heading B"),
+        ]
+    )
+
+    parsed = parse_document(data, "tabled.docx", DOCX_TYPE)
+
+    assert [(s.section_title, s.text) for s in parsed.sections] == [
+        ("Heading A", "K: k1 | V: v1"),
+        ("Heading B", "Heading B"),
+    ]
+
+
+def test_parse_docx_does_not_repeat_a_heading_that_titles_a_text_box() -> None:
+    """The same holds for a shape: it carries the heading, so it is not repeated."""
+
+    data = build_docx_blocks(
+        [
+            ("heading", "Heading A"),
+            ("textbox", "Boxed text"),
+            ("heading", "Heading B"),
+        ]
+    )
+
+    parsed = parse_document(data, "boxed.docx", DOCX_TYPE)
+
+    assert [(s.section_title, s.text) for s in parsed.sections] == [
+        ("Heading A", "Boxed text"),
+        ("Heading B", "Heading B"),
+    ]
+
+
+def test_parse_docx_alternating_headings_and_bodies_are_unchanged() -> None:
+    """The control: the ordinary shape must parse exactly as it always did."""
+
+    data = build_docx([("Introduction", "Intro body."), ("Methods", "Methods body.")])
+
+    parsed = parse_document(data, "paper.docx", DOCX_TYPE)
+
+    assert [(s.section_title, s.text) for s in parsed.sections] == [
+        ("Introduction", "Intro body."),
+        ("Methods", "Methods body."),
+    ]
+
+
+def test_parse_docx_never_produces_a_section_with_empty_text() -> None:
+    """Recovering a heading must not cost a crop of empty sections."""
+
+    data = build_docx_blocks(
+        [
+            ("heading", "A"),
+            ("heading", "B"),
+            ("paragraph", "Body"),
+            ("table", [["K", "V"], ["k", "v"]]),
+            ("textbox", "Boxed"),
+            ("heading", "C"),
+        ]
+    )
+
+    parsed = parse_document(data, "mixed.docx", DOCX_TYPE)
+
+    assert parsed.sections
+    assert all(section.text.strip() for section in parsed.sections)
+
+
+# --- section_title is bounded, the heading is not ------------------------
+
+
+def test_parse_docx_leaves_a_title_at_the_limit_untouched() -> None:
+    """A heading exactly at the bound is not trimmed."""
+
+    heading = "H" * MAX_SECTION_TITLE_LENGTH
+    data = build_docx_blocks([("heading", heading), ("paragraph", "Body.")])
+
+    parsed = parse_document(data, "limit.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].section_title == heading
+
+
+def test_parse_docx_bounds_a_long_title_but_keeps_the_whole_heading() -> None:
+    """The label is trimmed; the heading itself is not.
+
+    `section_title` is metadata — never embedded, never searched — so bounding
+    it loses nothing retrievable, provided the heading survives as text.
+    """
+
+    heading = "Solution Approach: " + "word " * 200
+    data = build_docx_blocks([("heading", heading.strip())])
+
+    parsed = parse_document(data, "long.docx", DOCX_TYPE)
+    section = parsed.sections[0]
+
+    assert len(section.section_title) == MAX_SECTION_TITLE_LENGTH
+    assert section.text == heading.strip()
+    assert len(section.text) > MAX_SECTION_TITLE_LENGTH
+
+
+def test_parse_docx_handles_the_corpus_636_character_heading() -> None:
+    """The real case: a 636-character paragraph styled as a heading.
+
+    `DocumentChunk.section_title` is `String(512)`, which PostgreSQL enforces
+    and SQLite does not — so before this bound the document parsed cleanly in
+    every test and failed the insert on the database that ships.
+    """
+
+    # Exactly 636 characters and ending on a word, so the parser's `strip()`
+    # cannot make the assertion pass or fail for the wrong reason.
+    sentence = "For over 15 years Aikya has extensively provided data services. "
+    heading = (sentence * 10)[:635] + "."
+    assert len(heading) == 636
+
+    data = build_docx_blocks([("heading", heading), ("paragraph", "Body.")])
+
+    parsed = parse_document(data, "exhibit.docx", DOCX_TYPE)
+
+    assert len(parsed.sections[0].section_title) <= MAX_SECTION_TITLE_LENGTH
+    assert heading in parsed.text
+
+
+def test_parse_pptx_bounds_a_long_slide_title() -> None:
+    """PPTX titles go through the same bound, and stay whole in the text."""
+
+    title = "Product Information Management Concepts and Their Application " * 6
+    title = title.strip()
+    parsed = parse_document(build_pptx([{"title": title}]), "deck.pptx", PPTX_TYPE)
+    section = parsed.sections[0]
+
+    assert len(title) > MAX_SECTION_TITLE_LENGTH
+    assert len(section.section_title) == MAX_SECTION_TITLE_LENGTH
+    assert section.text == title
+
+
+@pytest.mark.parametrize("length", [10, 199, 200, 201, 636, 2000])
+def test_every_section_title_respects_the_bound(length: int) -> None:
+    """The invariant, across both formats that produce titles."""
+
+    heading = "T" * length
+    docx_parsed = parse_document(
+        build_docx_blocks([("heading", heading), ("paragraph", "Body.")]),
+        "d.docx",
+        DOCX_TYPE,
+    )
+    pptx_parsed = parse_document(
+        build_pptx([{"title": heading, "body": "Body."}]), "d.pptx", PPTX_TYPE
+    )
+
+    for parsed in (docx_parsed, pptx_parsed):
+        for section in parsed.sections:
+            if section.section_title is not None:
+                assert len(section.section_title) <= MAX_SECTION_TITLE_LENGTH
+
+
 # --- DOCX runs nested inside wrappers ------------------------------------
 
 
@@ -570,6 +798,137 @@ def test_parse_docx_counts_a_wrapped_run_as_a_heading() -> None:
 
     assert parsed.sections[0].section_title == "Executive Summary"
     assert parsed.sections[0].text == "Body text."
+
+
+# --- table header detection ----------------------------------------------
+
+
+def test_parse_docx_treats_a_prose_first_row_as_data_not_headers() -> None:
+    """A page laid out as a table is not a table of data.
+
+    Read as headers, the first row's prose becomes a prefix on the rows below
+    and any column with no cell beneath it is dropped entirely.
+    """
+
+    left = "The Challenge. " * 30
+    right = "How it works. " * 30
+    data = build_docx_blocks([("table", [[left, right], ["Call to action.", ""]])])
+
+    parsed = parse_document(data, "layout.docx", DOCX_TYPE)
+    text = parsed.sections[0].text
+
+    assert left.strip() in text
+    assert right.strip() in text
+    assert "Call to action." in text
+    assert ": " not in text.split("\n")[0]
+
+
+def test_parse_docx_keeps_the_whitepaper_second_column() -> None:
+    """The real regression: 1,956 characters of one column went missing.
+
+    `Sun Radia Whitepaper_Banking_Financial_Services.docx` lays its article
+    out as a two-column table whose second row holds a single call-to-action
+    cell. With row 0 read as headers, column 1 had nothing to attach to and
+    was never emitted.
+    """
+
+    challenge = "The Challenge Financial institutions operate under a paradox. " * 36
+    how = (
+        "HOW IT WORKS 1 INPUT INGESTION Any inbound channel is parsed. "
+        "2 INTELLIGENT PLAN MATCHING The platform reads intent. "
+        "3 AGENTIC WORKFLOW EXECUTION Agents verify documents. "
+        "4 DYNAMIC TOOL SELECTION Sub-agents are spawned as needed. " * 8
+    )
+    data = build_docx_blocks(
+        [("table", [[challenge, how], ["Ready to automate your SOPs?", ""]])]
+    )
+
+    parsed = parse_document(data, "whitepaper.docx", DOCX_TYPE)
+    text = parsed.text
+
+    for phrase in (
+        "HOW IT WORKS",
+        "INPUT INGESTION",
+        "INTELLIGENT PLAN MATCHING",
+        "AGENTIC WORKFLOW EXECUTION",
+        "DYNAMIC TOOL SELECTION",
+    ):
+        assert phrase in text
+
+    assert how.strip() in text
+    assert challenge.strip() in text
+
+
+def test_parse_docx_keeps_a_header_cell_at_the_length_limit() -> None:
+    """A label exactly at the bound is still a label."""
+
+    label = "H" * _MAX_HEADER_CELL_LENGTH
+    data = build_docx_blocks([("table", [[label, "Role"], ["Ann", "Lead"]])])
+
+    parsed = parse_document(data, "boundary.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == f"{label}: Ann | Role: Lead"
+
+
+def test_parse_docx_rejects_a_header_cell_one_character_over() -> None:
+    """One character past the bound and the row is data, not headers."""
+
+    label = "H" * (_MAX_HEADER_CELL_LENGTH + 1)
+    data = build_docx_blocks([("table", [[label, "Role"], ["Ann", "Lead"]])])
+
+    parsed = parse_document(data, "boundary.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == f"{label} | Role\nAnn | Lead"
+
+
+def test_parse_docx_rejects_the_header_when_any_cell_is_too_long() -> None:
+    """The test is over every label, not the first or the average."""
+
+    long_label = "L" * (_MAX_HEADER_CELL_LENGTH + 50)
+    data = build_docx_blocks(
+        [("table", [["Short", "Also short", long_label], ["a", "b", "c"]])]
+    )
+
+    parsed = parse_document(data, "mixed.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == f"Short | Also short | {long_label}\na | b | c"
+
+
+def test_parse_docx_ordinary_table_output_is_unchanged() -> None:
+    """The shape almost every real table has must be byte-identical."""
+
+    data = build_docx_blocks([("table", [["Name", "Role"], ["Ann", "Lead architect"]])])
+
+    parsed = parse_document(data, "normal.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "Name: Ann | Role: Lead architect"
+
+
+def test_parse_docx_still_omits_a_label_whose_column_is_empty() -> None:
+    """Deliberately unchanged: a label with no value is not worth emitting.
+
+    Tracked separately from the header-length problem; a bare `Release Date:`
+    would add noise without adding meaning.
+    """
+
+    data = build_docx_blocks([("table", [["S. No.", "Release Date"], ["1", ""]])])
+
+    parsed = parse_document(data, "irregular.docx", DOCX_TYPE)
+
+    assert parsed.sections[0].text == "S. No.: 1"
+
+
+def test_docx_and_pptx_serialise_a_long_prose_table_identically() -> None:
+    """The serialiser stays shared: both formats take the same fallback."""
+
+    grid = [["Prose. " * 40, "More prose. " * 40], ["Tail cell", ""]]
+
+    from_docx = parse_document(
+        build_docx_blocks([("table", grid)]), "d.docx", DOCX_TYPE
+    )
+    from_pptx = parse_document(build_pptx([{"table": grid}]), "d.pptx", PPTX_TYPE)
+
+    assert from_docx.sections[0].text == from_pptx.sections[0].text
 
 
 # --- PPTX ----------------------------------------------------------------

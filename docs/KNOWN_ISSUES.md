@@ -39,6 +39,11 @@ Page boundaries in DOCX are a rendering property, so chunks from a DOCX carry a 
 - **Impact:** citations into DOCX documents will name a heading rather than a page.
 - **Priority:** Low — accepted.
 
+### `section_title` is a bounded label, not the whole heading
+`section_title` is capped at `MAX_SECTION_TITLE_LENGTH` (200 characters) where the parser builds it. It is metadata: never embedded, never searched, used only for citations and the passage labels in chat context. The complete heading is always kept in the section's own text, so nothing is lost — a heading longer than the cap becomes a section in its own right rather than surviving only as a truncated label.
+- **Impact:** a citation into a document whose heading runs to a paragraph names the first 200 characters. The cap also keeps the value inside `DocumentChunk.section_title`, which is `String(512)` — enforced by PostgreSQL and ignored by SQLite, so an over-long heading would otherwise fail an ingest that the whole test suite passes.
+- **Priority:** Accepted by design. Measured against the corpus: 322 of 323 titles are under the cap, the median is 28 characters and the 99th percentile 91.
+
 ### Extraction quality is untested against real documents
 `pypdf` handles well-formed PDFs. Multi-column layouts, tables and unusual encodings have not been exercised against anything but generated fixtures.
 - **Impact:** unknown extraction quality on real customer material.
