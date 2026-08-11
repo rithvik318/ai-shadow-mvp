@@ -27,7 +27,7 @@ A one-shot live call reporting the configured provider, model and returned width
 - **Dependencies:** Embedding Generation
 
 ### Semantic Retrieval
-Top-k cosine similarity search over stored chunk vectors, run in the database against the HNSW index. Configurable `top_k` and similarity floor, scoped by user, restricted to `indexed` documents, with duplicate content collapsed on a whitespace- and case-insensitive fingerprint, so the same passage under two filenames does not take two of the slots a caller asked for. Results carry document, filename, page and heading, so a citation can be resolved. Reached over HTTP through `POST /chat`.
+Top-k cosine similarity search over stored chunk vectors, run in the database against the HNSW index. Configurable `top_k` and similarity floor, scoped by user, restricted to `indexed` documents, with duplicate content collapsed on a whitespace- and case-insensitive fingerprint, so the same passage under two filenames does not take two of the slots a caller asked for. Results carry document, filename, page and heading, so a citation can be resolved. Reached over HTTP through `POST /chat` and, without the model, through `POST /search`.
 - **Status:** Implemented
 - **Dependencies:** Embedding Generation, Document Models & Migrations
 
@@ -40,6 +40,11 @@ A `cosine_distance` construct compiling to pgvector's `<=>` on Postgres and to a
 `POST /chat` answers a question using only the caller's indexed documents. Retrieval supplies the context, which is assembled into delimited `[SOURCE n]` blocks naming the document, section and page of each passage; the registered `rag_answer` prompt constrains the model to those passages and instructs it to cite them by identifier. The response carries each passage as `document`, `section`, `page` and `similarity`. Context is bounded by `CHAT_CONTEXT_MAX_CHARS` — passages dropped for budget are not reported as sources, because the model never saw them. Stateless: no conversation history is kept or consulted.
 - **Status:** Implemented
 - **Dependencies:** Semantic Retrieval, Prompt Registry System, LLM Provider Abstraction
+
+### Retrieval-Only Search
+`POST /search` runs the retrieval half of the pipeline and stops: query embedding, vector search, deduplication and the similarity floor, returning ranked passages with `document`, `section`, `page`, `similarity` and the passage text. No prompt is rendered and no completion is requested, so relevance can be judged — and `RETRIEVAL_SIMILARITY_THRESHOLD` tuned — without paying for an answer or being persuaded by one. Same 1–50 `top_k` window as chat; nothing found is `200` with an empty result set.
+- **Status:** Implemented
+- **Dependencies:** Semantic Retrieval
 
 ### Document Management API
 List documents with status filtering and pagination, retrieve one by id including its failure reason, and delete a document with its chunks. `GET /documents`, `GET /documents/{id}`, `DELETE /documents/{id}`.
@@ -101,11 +106,6 @@ None. See [`ROADMAP.md`](ROADMAP.md).
 Attribution of individual claims to specific passages, by having the model cite by index and validating those indices through the Analysis Engine. Today every retrieved passage is returned as a source, including any the model did not use.
 - **Status:** Planned
 - **Dependencies:** RAG Chat, Analysis Engine
-
-### Search Endpoint
-`POST /search` exposing retrieval without the model, for debugging relevance.
-- **Status:** Planned
-- **Dependencies:** Semantic Retrieval
 
 ### Frontend
 React and Tailwind interface for upload, document management, chat, and source display.

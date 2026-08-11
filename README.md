@@ -179,6 +179,49 @@ When nothing relevant is found the endpoint returns `200` with `retrieved_chunks
 | `422` | Blank question, or `top_k` out of range |
 | `502` | The embedding or language model provider failed |
 
+### `POST /search`
+
+Run retrieval on its own and see what comes back. No prompt is rendered and no completion is requested, so this is what `POST /chat` would have been shown for the same query — without the latency, the cost, or the model's account of it. It is the endpoint to tune `RETRIEVAL_SIMILARITY_THRESHOLD` against.
+
+```bash
+curl -X POST http://localhost:8000/search \
+     -H "Content-Type: application/json" \
+     -d '{"question": "How does holiday accrue?", "top_k": 5}'
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `question` | string, 1–4000 chars | Required; must not be blank |
+| `top_k` | integer, 1–50 | Optional; defaults to `RETRIEVAL_TOP_K` |
+
+```json
+{
+  "query": "How does holiday accrue?",
+  "results": [
+    {
+      "document": "handbook.pdf",
+      "section": "Leave and Absence",
+      "page": 12,
+      "similarity": 0.91,
+      "content": "Holiday accrues at two days per month...",
+      "document_id": "9f1c2b6e-...",
+      "chunk_id": "3a77e410-..."
+    }
+  ],
+  "retrieved_count": 3
+}
+```
+
+`results` are the passages `/chat` would draw on, in the same order and with the same `document`, `section` and `page` provenance — plus `content`, the passage itself, because a similarity score cannot explain itself without the text it scores. The context budget does not apply here: `/chat` may drop the least relevant of these before the model sees them, and `CHAT_CONTEXT_MAX_CHARS` is what governs that.
+
+Nothing found is `200` with an empty `results` and `retrieved_count: 0`, never `404` — an empty knowledge base is a normal state.
+
+| Status | When |
+|---|---|
+| `200` | Passages found, or nothing relevant |
+| `422` | Blank query, or `top_k` out of range |
+| `502` | The embedding provider failed |
+
 ### `GET /health`, `GET /`
 
 Liveness probe and service information.

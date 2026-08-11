@@ -1,0 +1,647 @@
+{
+  "phase7": [
+    {
+      "file": "Sun Radia Capabilities Statement - June 2026.docx",
+      "status_code": 201,
+      "ms": 12402,
+      "body": {
+        "id": "ad7222a1-92be-4278-b26f-5bb2a16d2fd2",
+        "filename": "Sun Radia Capabilities Statement - June 2026.docx",
+        "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "file_size_bytes": 108463,
+        "page_count": null,
+        "chunk_count": 9,
+        "status": "indexed",
+        "error_message": null,
+        "created_at": "2026-08-11T19:38:50.872225+05:30",
+        "updated_at": "2026-08-11T19:38:50.872225+05:30"
+      }
+    },
+    {
+      "file": "Freddie Mac - Sun Radia Analytics Optimization and Modernization - Feb 11th 2026 with notes.pptx",
+      "status_code": 201,
+      "ms": 5458,
+      "body": {
+        "id": "47166851-da49-4821-ad48-40d42bd39464",
+        "filename": "Freddie Mac - Sun Radia Analytics Optimization and Modernization - Feb 11th 2026 with notes.pptx",
+        "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "file_size_bytes": 1182476,
+        "page_count": 10,
+        "chunk_count": 18,
+        "status": "indexed",
+        "error_message": null,
+        "created_at": "2026-08-11T19:39:03.283331+05:30",
+        "updated_at": "2026-08-11T19:39:03.283331+05:30"
+      }
+    },
+    {
+      "file": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+      "status_code": 201,
+      "ms": 8064,
+      "body": {
+        "id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+        "filename": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+        "content_type": "application/pdf",
+        "file_size_bytes": 1897977,
+        "page_count": 27,
+        "chunk_count": 75,
+        "status": "indexed",
+        "error_message": null,
+        "created_at": "2026-08-11T19:39:08.792247+05:30",
+        "updated_at": "2026-08-11T19:39:08.792247+05:30"
+      }
+    },
+    {
+      "file": "LN-EPIM-11 System Inventory v1.2.docx",
+      "status_code": 201,
+      "ms": 5972,
+      "body": {
+        "id": "01238091-991c-4e97-8089-b1dbb03a63c3",
+        "filename": "LN-EPIM-11 System Inventory v1.2.docx",
+        "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "file_size_bytes": 272577,
+        "page_count": null,
+        "chunk_count": 69,
+        "status": "indexed",
+        "error_message": null,
+        "created_at": "2026-08-11T19:39:16.131783+05:30",
+        "updated_at": "2026-08-11T19:39:16.131783+05:30"
+      }
+    },
+    {
+      "file": "service offerings and probelm solutions.txt",
+      "status_code": 201,
+      "ms": 3432,
+      "body": {
+        "id": "ac244b11-af48-4ef0-a7f7-9b884b5155f2",
+        "filename": "service offerings and probelm solutions.txt",
+        "content_type": "text/plain",
+        "file_size_bytes": 2601,
+        "page_count": null,
+        "chunk_count": 3,
+        "status": "indexed",
+        "error_message": null,
+        "created_at": "2026-08-11T19:39:22.154415+05:30",
+        "updated_at": "2026-08-11T19:39:22.154415+05:30"
+      }
+    },
+    {
+      "file": "SF-DART__PRS_Updated_04-16-2019.1557492690022.docx",
+      "status_code": 201,
+      "ms": 6208,
+      "body": {
+        "id": "1e91c00f-bbb5-4fbb-a66f-0baf473241ee",
+        "filename": "SF-DART__PRS_Updated_04-16-2019.1557492690022.docx",
+        "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "file_size_bytes": 56220,
+        "page_count": null,
+        "chunk_count": 66,
+        "status": "indexed",
+        "error_message": null,
+        "created_at": "2026-08-11T19:39:25.696668+05:30",
+        "updated_at": "2026-08-11T19:39:25.696668+05:30"
+      }
+    }
+  ],
+  "phase8": [
+    {
+      "question": "What is Sun Radia's registered business address?",
+      "expected_document": "Sun Radia Capabilities Statement - June 2026.docx",
+      "answer": "Sun\u202fRadia\u2019s registered business address is:\n\n**11872\u202fSunrise\u202fValley\u202fDrive, Suite\u202f201, Reston,\u202fVA\u202f20191**\u3010SOURCE\u202f1\u3011\u3010SOURCE\u202f2\u3011\u3010SOURCE\u202f4\u3011",
+      "document_retrieved": true,
+      "grounded": true,
+      "sources": [
+        {
+          "document": "Sun Radia Capabilities Statement - June 2026.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.7530842071625784,
+          "document_id": "ad7222a1-92be-4278-b26f-5bb2a16d2fd2",
+          "chunk_id": "125c3082-f3a8-4f05-b12e-35caefe320af"
+        },
+        {
+          "document": "Sun Radia Capabilities Statement - June 2026.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.6237778565768318,
+          "document_id": "ad7222a1-92be-4278-b26f-5bb2a16d2fd2",
+          "chunk_id": "fb54a81a-c314-4b0f-8531-9372fba5500a"
+        },
+        {
+          "document": "Freddie Mac - Sun Radia Analytics Optimization and Modernization - Feb 11th 2026 with notes.pptx",
+          "section": null,
+          "page": 1,
+          "similarity": 0.5597024702656123,
+          "document_id": "47166851-da49-4821-ad48-40d42bd39464",
+          "chunk_id": "6d020df9-1160-4d39-9f78-f5b65007fb9c"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 1,
+          "similarity": 0.5594341235584499,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "6f79105d-e416-4974-9dd0-612e74aeb857"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 24,
+          "similarity": 0.5107834109725381,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "2a4b4ed6-5c7a-4ce1-a8dc-5b1ff491e582"
+        }
+      ]
+    },
+    {
+      "question": "What does Sun Radia say about enterprise AI architecture?",
+      "expected_document": "Sun Radia Capabilities Statement - June 2026.docx",
+      "answer": "Sun\u202fRadia defines **enterprise AI architecture** as a **load\u2011bearing capability that touches every product, workflow, and decision in an organization** rather than a set of isolated experiments.  According to the statement:\n\n* The core of the architecture is a unified **AI platform** that includes a model gateway, agent runtimes, evaluation, observability, and policy primitives.  \n* A complementary **data plane** supplies feature stores, vector indices, retrieval, lineage, and freshness.  \n* Cross\u2011cutting concerns\u2014security, governance, and FinOps\u2014are enforced at every layer of the stack.  \n* The focus shifts from training models to **composing the platform, data, security, and operating model** so that thousands of AI components can run safely and at scale.  \n\nSun\u202fRadia\u2019s framework is shaped by six architect lenses, each of which owns a part of this enterprise\u2011wide delivery and identifies a single action that must be taken next.  \n\n[Source\u202f2] [Source\u202f1]",
+      "document_retrieved": true,
+      "grounded": true,
+      "sources": [
+        {
+          "document": "Sun Radia Capabilities Statement - June 2026.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.7292781714347035,
+          "document_id": "ad7222a1-92be-4278-b26f-5bb2a16d2fd2",
+          "chunk_id": "78d28195-a466-4ad8-b276-18fa1b045b94"
+        },
+        {
+          "document": "Sun Radia Capabilities Statement - June 2026.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.6957594317495833,
+          "document_id": "ad7222a1-92be-4278-b26f-5bb2a16d2fd2",
+          "chunk_id": "c3606074-c58a-4d5c-bcef-339322db21c2"
+        },
+        {
+          "document": "Freddie Mac - Sun Radia Analytics Optimization and Modernization - Feb 11th 2026 with notes.pptx",
+          "section": null,
+          "page": 1,
+          "similarity": 0.6030602131945836,
+          "document_id": "47166851-da49-4821-ad48-40d42bd39464",
+          "chunk_id": "6d020df9-1160-4d39-9f78-f5b65007fb9c"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 3,
+          "similarity": 0.5983031771011387,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "af73a307-3057-4e9a-95a3-4819344d6e2a"
+        },
+        {
+          "document": "Sun Radia Capabilities Statement - June 2026.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.5482670360850913,
+          "document_id": "ad7222a1-92be-4278-b26f-5bb2a16d2fd2",
+          "chunk_id": "b1e008e2-75aa-45c4-9a04-781dd749cf93"
+        }
+      ]
+    },
+    {
+      "question": "How many years has Sun Radia partnered with Freddie Mac?",
+      "expected_document": "Freddie Mac - Sun Radia Analytics Optimization and Modernization - Feb 11th 2026 with notes.pptx",
+      "answer": "Sun\u202fRadia has partnered with Freddie\u202fMac for **15\u202f+ years** [SOURCE\u202f1].",
+      "document_retrieved": true,
+      "grounded": true,
+      "sources": [
+        {
+          "document": "Freddie Mac - Sun Radia Analytics Optimization and Modernization - Feb 11th 2026 with notes.pptx",
+          "section": null,
+          "page": 3,
+          "similarity": 0.6141795727479172,
+          "document_id": "47166851-da49-4821-ad48-40d42bd39464",
+          "chunk_id": "86dea067-f6c5-478f-91a7-4aea4d53a2de"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 22,
+          "similarity": 0.5515915448871359,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "61ae82e7-97cb-44b1-9dc9-37ddb5847789"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 21,
+          "similarity": 0.53649180621978,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "1543f855-36f5-4973-b5f9-216261328932"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 21,
+          "similarity": 0.5154820888776045,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "3836ad94-914d-44be-95a0-ea62e9e2324c"
+        },
+        {
+          "document": "Sun Radia Capabilities Statement - June 2026.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.5002949056997803,
+          "document_id": "ad7222a1-92be-4278-b26f-5bb2a16d2fd2",
+          "chunk_id": "125c3082-f3a8-4f05-b12e-35caefe320af"
+        }
+      ]
+    },
+    {
+      "question": "What is on the agenda for the Freddie Mac analytics meeting?",
+      "expected_document": "Freddie Mac - Sun Radia Analytics Optimization and Modernization - Feb 11th 2026 with notes.pptx",
+      "answer": "I\u2019m sorry, but none of the supplied passages explicitly list an agenda for a Freddie\u202fMac analytics meeting.",
+      "document_retrieved": true,
+      "grounded": true,
+      "sources": [
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 21,
+          "similarity": 0.5665568171974441,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "1543f855-36f5-4973-b5f9-216261328932"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 22,
+          "similarity": 0.5461739161379642,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "61ae82e7-97cb-44b1-9dc9-37ddb5847789"
+        },
+        {
+          "document": "Freddie Mac - Sun Radia Analytics Optimization and Modernization - Feb 11th 2026 with notes.pptx",
+          "section": null,
+          "page": 7,
+          "similarity": 0.49202863945988695,
+          "document_id": "47166851-da49-4821-ad48-40d42bd39464",
+          "chunk_id": "2d96a316-62a0-4941-85d7-d74aacc2307c"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 21,
+          "similarity": 0.48897471951439486,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "3836ad94-914d-44be-95a0-ea62e9e2324c"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 4,
+          "similarity": 0.41692144633274264,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "3f973602-26bf-4877-924a-6f7aae8ff057"
+        }
+      ]
+    },
+    {
+      "question": "What is Sun Radia's customer retention rate?",
+      "expected_document": "Freddie Mac - Sun Radia Analytics Optimization and Modernization - Feb 11th 2026 with notes.pptx",
+      "answer": "The provided documents do not contain any information about Sun Radia\u2019s customer retention rate.  They discuss employee retention and related strategies but do not mention a customer retention metric.",
+      "document_retrieved": false,
+      "grounded": true,
+      "sources": [
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 26,
+          "similarity": 0.6705576657419946,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "24bc15d2-afbd-4522-8b29-b5fddec5d5d3"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 24,
+          "similarity": 0.633223108274213,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "5bd5bd95-f0f3-4848-acdf-8180327cbf6b"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 27,
+          "similarity": 0.611575222436435,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "e32d9597-fd01-44ee-bb55-c86df19f2c51"
+        },
+        {
+          "document": "Sun Radia Capabilities Statement - June 2026.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.5960490895729215,
+          "document_id": "ad7222a1-92be-4278-b26f-5bb2a16d2fd2",
+          "chunk_id": "125c3082-f3a8-4f05-b12e-35caefe320af"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 27,
+          "similarity": 0.5892174723600838,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "a7934266-d401-451d-9dba-0bb2d8a916b7"
+        }
+      ]
+    },
+    {
+      "question": "Which solicitation number is the CFTC data quality proposal responding to?",
+      "expected_document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+      "answer": "The proposal is responding to solicitation **9523ZY24Q0012**\u202f[source\u202f1].",
+      "document_retrieved": true,
+      "grounded": true,
+      "sources": [
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 1,
+          "similarity": 0.5754176019785823,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "6f79105d-e416-4974-9dd0-612e74aeb857"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 21,
+          "similarity": 0.53263886903497,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "46b98aae-97c3-4791-a242-f5f7ec7025ab"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 4,
+          "similarity": 0.5166734775666354,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "3f973602-26bf-4877-924a-6f7aae8ff057"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 21,
+          "similarity": 0.4613418363680841,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "3836ad94-914d-44be-95a0-ea62e9e2324c"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 23,
+          "similarity": 0.45635799020185885,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "8637f53f-7a07-4709-9c12-4de0d13a4be4"
+        }
+      ]
+    },
+    {
+      "question": "Who is the contracting officer for the CFTC request for quotation?",
+      "expected_document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+      "answer": "The contracting officer for the CFTC request for quotation is **Benjamin\u202fVan\u202fWormer**.  [SOURCE\u00a03]",
+      "document_retrieved": true,
+      "grounded": true,
+      "sources": [
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 23,
+          "similarity": 0.5640709251497791,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "8637f53f-7a07-4709-9c12-4de0d13a4be4"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 21,
+          "similarity": 0.5481159849161245,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "46b98aae-97c3-4791-a242-f5f7ec7025ab"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 1,
+          "similarity": 0.5233499753749549,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "6f79105d-e416-4974-9dd0-612e74aeb857"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 4,
+          "similarity": 0.46415759832213466,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "3f973602-26bf-4877-924a-6f7aae8ff057"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 23,
+          "similarity": 0.4507495652222345,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "cc7a1407-3b6b-4e16-8b22-8bbb0eb853ea"
+        }
+      ]
+    },
+    {
+      "question": "What was the LexisNexis MDM system inventory work stream?",
+      "expected_document": "LN-EPIM-11 System Inventory v1.2.docx",
+      "answer": "The LexisNexis MDM **System Inventory** work stream was a *Data Assessment Work Stream* created for Phase\u202fI of the MDM Project (Strategy). It was designated as Task\u202fLN\u201111 on the project plan and tasked with inventorying and documenting all LexisNexis systems that contain or manage product data. The effort involved identifying key enterprise systems, scheduling and conducting interviews with subject\u2011matter experts and internal consultants, gathering historical integration documentation and SharePoint records, and compiling the findings into results, conclusions, and recommendations for moving forward in the MDM project. [SOURCE 1][SOURCE 3]",
+      "document_retrieved": true,
+      "grounded": true,
+      "sources": [
+        {
+          "document": "LN-EPIM-11 System Inventory v1.2.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.7436167885240861,
+          "document_id": "01238091-991c-4e97-8089-b1dbb03a63c3",
+          "chunk_id": "1c47578c-78d0-4306-8b6b-d9fd826d462b"
+        },
+        {
+          "document": "LN-EPIM-11 System Inventory v1.2.docx",
+          "section": "Executive Summary",
+          "page": null,
+          "similarity": 0.672223655825704,
+          "document_id": "01238091-991c-4e97-8089-b1dbb03a63c3",
+          "chunk_id": "4606d3d2-87bb-4b7b-9d6b-07947a50fec7"
+        },
+        {
+          "document": "LN-EPIM-11 System Inventory v1.2.docx",
+          "section": "Executive Summary",
+          "page": null,
+          "similarity": 0.6205291431103777,
+          "document_id": "01238091-991c-4e97-8089-b1dbb03a63c3",
+          "chunk_id": "5427e1e4-a25a-430f-82c2-0f10d730d07f"
+        },
+        {
+          "document": "LN-EPIM-11 System Inventory v1.2.docx",
+          "section": "Executive Summary",
+          "page": null,
+          "similarity": 0.5919093666892442,
+          "document_id": "01238091-991c-4e97-8089-b1dbb03a63c3",
+          "chunk_id": "0bd3af4f-ec2e-4658-98f1-afc39be162fc"
+        },
+        {
+          "document": "LN-EPIM-11 System Inventory v1.2.docx",
+          "section": "Appendix \u2013 MDM Source and Target System List",
+          "page": null,
+          "similarity": 0.5655369573168713,
+          "document_id": "01238091-991c-4e97-8089-b1dbb03a63c3",
+          "chunk_id": "4319e494-f96f-4f0c-860d-9bb7a98b9956"
+        }
+      ]
+    },
+    {
+      "question": "Which accelerator addresses synthetic identity fraud for banks?",
+      "expected_document": "service offerings and probelm solutions.txt",
+      "answer": "The accelerator that tackles synthetic identity fraud for banks is the **Agentic\u202fKYC/B\u202fWorkflows** solution. [SOURCE 2]",
+      "document_retrieved": true,
+      "grounded": true,
+      "sources": [
+        {
+          "document": "CodeStreet - Kilari's Team_doc.pdf",
+          "section": null,
+          "page": 12,
+          "similarity": 0.47382542997423693,
+          "document_id": "fe2f9c6d-51cd-46e4-95b6-bf06a141b751",
+          "chunk_id": "d271719e-a00f-4727-bdea-9d137c438cde"
+        },
+        {
+          "document": "service offerings and probelm solutions.txt",
+          "section": null,
+          "page": null,
+          "similarity": 0.471298272086051,
+          "document_id": "ac244b11-af48-4ef0-a7f7-9b884b5155f2",
+          "chunk_id": "9cba5020-5387-45d0-bec4-c312e1ce523d"
+        },
+        {
+          "document": "CodeStreet - Kilari's Team_doc.pdf",
+          "section": null,
+          "page": 6,
+          "similarity": 0.4119146470039041,
+          "document_id": "fe2f9c6d-51cd-46e4-95b6-bf06a141b751",
+          "chunk_id": "57763af6-509d-4954-bfff-21cec3c4c714"
+        },
+        {
+          "document": "CodeStreet - Kilari's Team_doc.pdf",
+          "section": null,
+          "page": 2,
+          "similarity": 0.3983730617308,
+          "document_id": "fe2f9c6d-51cd-46e4-95b6-bf06a141b751",
+          "chunk_id": "fe501ba5-3a8b-4405-9534-885a96b66531"
+        },
+        {
+          "document": "CodeStreet - Kilari's Team_doc.pdf",
+          "section": null,
+          "page": 12,
+          "similarity": 0.3865801671166029,
+          "document_id": "fe2f9c6d-51cd-46e4-95b6-bf06a141b751",
+          "chunk_id": "880e4dc0-2d16-4b95-a3ae-20cdeaf5c8ee"
+        }
+      ]
+    },
+    {
+      "question": "What does Sun Radia propose for data silos and legacy debt?",
+      "expected_document": "service offerings and probelm solutions.txt",
+      "answer": "Sun\u202fRadia proposes a two\u2011part solution for the \u201cData Silos/Legacy Debt\u201d pain point: a **Metadata Auto\u2011Indexer** to surface and catalog existing data, and a **Legacy\u2011to\u2011Cloud Migrator** to move that data into a cloud\u2011based environment.\u3010SOURCE 2\u3011\u3010SOURCE 5\u3011",
+      "document_retrieved": true,
+      "grounded": true,
+      "sources": [
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 3,
+          "similarity": 0.5509797770236459,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "af73a307-3057-4e9a-95a3-4819344d6e2a"
+        },
+        {
+          "document": "service offerings and probelm solutions.txt",
+          "section": null,
+          "page": null,
+          "similarity": 0.5364195197396331,
+          "document_id": "ac244b11-af48-4ef0-a7f7-9b884b5155f2",
+          "chunk_id": "9cba5020-5387-45d0-bec4-c312e1ce523d"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 21,
+          "similarity": 0.5287453813482681,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "3836ad94-914d-44be-95a0-ea62e9e2324c"
+        },
+        {
+          "document": "CFTC - 9523ZY24Q0012 - DQDA - Volume II - Technical Information.pdf",
+          "section": null,
+          "page": 21,
+          "similarity": 0.5160647892930146,
+          "document_id": "30480600-3f4b-4b7f-9ea7-5a1a1108217b",
+          "chunk_id": "d24b27e2-d034-4b31-a967-6982901ba5f0"
+        },
+        {
+          "document": "service offerings and probelm solutions.txt",
+          "section": null,
+          "page": null,
+          "similarity": 0.5106165852278136,
+          "document_id": "ac244b11-af48-4ef0-a7f7-9b884b5155f2",
+          "chunk_id": "5f3616f4-15ee-43a9-965e-18653a9c1b5e"
+        }
+      ]
+    },
+    {
+      "question": "What are the transition-in requirements and AQLs in the SF-DART PRS?",
+      "expected_document": "SF-DART__PRS_Updated_04-16-2019.1557492690022.docx",
+      "answer": "The **transition\u2011in** portion of the SF\u2011DART PRS (Task\u202f1: Transition\u2011In/Conversion) specifies that the contractor must submit PIV documents to HUD **within seven (7) calendar days of the effective date of the contract or three (3) calendar days prior to the commencement of training**. The AQL for this requirement is **\u201cNo deviation.\u201d** [SOURCE\u202f3]",
+      "document_retrieved": true,
+      "grounded": true,
+      "sources": [
+        {
+          "document": "SF-DART__PRS_Updated_04-16-2019.1557492690022.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.6167885548258031,
+          "document_id": "1e91c00f-bbb5-4fbb-a66f-0baf473241ee",
+          "chunk_id": "fcd09584-fe73-4690-9f04-c5bc5ca4aa6b"
+        },
+        {
+          "document": "SF-DART__PRS_Updated_04-16-2019.1557492690022.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.6045540643545046,
+          "document_id": "1e91c00f-bbb5-4fbb-a66f-0baf473241ee",
+          "chunk_id": "644282f7-6959-484d-8a67-8c3cfe5729a9"
+        },
+        {
+          "document": "SF-DART__PRS_Updated_04-16-2019.1557492690022.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.597425920654873,
+          "document_id": "1e91c00f-bbb5-4fbb-a66f-0baf473241ee",
+          "chunk_id": "643e291b-d2c0-4456-b99d-ca6200f5bbfa"
+        },
+        {
+          "document": "SF-DART__PRS_Updated_04-16-2019.1557492690022.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.5829217193069572,
+          "document_id": "1e91c00f-bbb5-4fbb-a66f-0baf473241ee",
+          "chunk_id": "e9571c43-a269-43a2-81d5-82ecd58bfe4e"
+        },
+        {
+          "document": "SF-DART__PRS_Updated_04-16-2019.1557492690022.docx",
+          "section": null,
+          "page": null,
+          "similarity": 0.5726985240783514,
+          "document_id": "1e91c00f-bbb5-4fbb-a66f-0baf473241ee",
+          "chunk_id": "51e7335b-f386-4aaf-8cb7-8bb25d5369db"
+        }
+      ]
+    }
+  ]
+}
