@@ -3,10 +3,13 @@ from fastapi.responses import JSONResponse
 
 from app.api.chat_routes import router as chat_router
 from app.api.document_routes import router as document_router
+from app.api.memory_routes import router as memory_router
+from app.api.profile_routes import router as profile_router
 from app.api.search_routes import router as search_router
 from app.config.settings import settings
 from app.core.exceptions import (
     AnalysisValidationError,
+    DigitalTwinError,
     DocumentError,
     DocumentNotFoundError,
     DocumentParseError,
@@ -15,6 +18,9 @@ from app.core.exceptions import (
     EmbeddingError,
     EmptyDocumentError,
     LLMServiceError,
+    MemoryNotFoundError,
+    ProfileIncompleteError,
+    ProfileNotFoundError,
     RetrievalError,
     UnsupportedDocumentTypeError,
 )
@@ -48,6 +54,39 @@ async def handle_document_error(request: Request, exc: DocumentError) -> JSONRes
         (
             code
             for error_type, code in _DOCUMENT_ERROR_STATUS
+            if isinstance(exc, error_type)
+        ),
+        400,
+    )
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": str(exc), "error": type(exc).__name__},
+    )
+
+
+_DIGITAL_TWIN_ERROR_STATUS: list[tuple[type[DigitalTwinError], int]] = [
+    (ProfileNotFoundError, 404),
+    (MemoryNotFoundError, 404),
+    (ProfileIncompleteError, 422),
+]
+
+
+@app.exception_handler(DigitalTwinError)
+async def handle_digital_twin_error(
+    request: Request, exc: DigitalTwinError
+) -> JSONResponse:
+    """Map profile and memory errors the same way document errors are mapped.
+
+    Kept separate from `DocumentError` rather than folded into it: a missing
+    profile and a missing document are both 404, but nothing else about them is
+    alike, and one hierarchy covering both would grow a branch per feature.
+    """
+
+    status_code = next(
+        (
+            code
+            for error_type, code in _DIGITAL_TWIN_ERROR_STATUS
             if isinstance(exc, error_type)
         ),
         400,
@@ -99,6 +138,8 @@ async def handle_llm_error(request: Request, exc: LLMServiceError) -> JSONRespon
 app.include_router(document_router)
 app.include_router(search_router)
 app.include_router(chat_router)
+app.include_router(profile_router)
+app.include_router(memory_router)
 
 
 @app.get("/", tags=["health"], summary="Service information")

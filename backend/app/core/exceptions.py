@@ -82,3 +82,26 @@ class RetrievalError(AIShadowError):
 
 class EmptyQueryError(RetrievalError):
     """Raised when a search query is blank."""
+
+
+# --- Digital Twin --------------------------------------------------------
+
+
+class DigitalTwinError(AIShadowError):
+    """Base class for profile and memory failures."""
+
+
+class ProfileNotFoundError(DigitalTwinError):
+    """Raised when no Digital Twin profile has been set up."""
+
+
+class ProfileIncompleteError(DigitalTwinError):
+    """Raised when the first write of a profile omits a required field.
+
+    Separate from `ProfileNotFoundError` because the caller's remedy differs:
+    one means "set one up", the other means "you nearly did".
+    """
+
+
+class MemoryNotFoundError(DigitalTwinError):
+    """Raised when a requested memory does not exist for this user."""

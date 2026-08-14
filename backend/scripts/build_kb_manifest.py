@@ -5,13 +5,25 @@ file, and writes a manifest recording what was selected, what was not, and why
 in every case. Nothing is uploaded, moved, renamed or deleted here — the
 manifest is a decision, and `ingest_kb_manifest.py` is what acts on it.
 
+**The policy is inclusive.** Everything first-party and readable is selected
+unless a rule excludes it, and the only reasons to exclude are: the format
+cannot be read, the content is sensitive or personal, the file is a template or
+a form with nothing to say, it belongs to another organisation, or it is a
+duplicate or a superseded version of something already selected. There are no
+per-category limits: a document is not dropped for being the twenty-first of
+its kind.
+
+Anything sensitive-looking but ambiguous goes to a third bucket, `review`,
+rather than being silently excluded — the point of a manifest is that a person
+can disagree with it.
+
 Deterministic: the same corpus produces byte-identical output. Files are walked
 in sorted order, every rule is a pure function of path, size and content hash,
 and no clock or filesystem timestamp is consulted.
 
 **Modification times are never used.** OneDrive rewrote them across this
 corpus, so a file's mtime says when it synced, not when it was written. A
-document's year is taken from its name or its folder or it is left null.
+document's date comes from its name or its folder, or it is left null.
 
 Run from `backend/`:
 
@@ -30,8 +42,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-# Formats the ingestion pipeline can read today. Everything else is excluded
-# rather than converted: legacy conversion is a later phase, not this one.
+# Formats the ingestion pipeline can read today. Everything else is reported
+# under `unsupported_formats` rather than converted: legacy conversion is a
+# later phase, and the report is what says whether it is worth doing.
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt", ".md", ".markdown"}
 
 # Mirrors MAX_UPLOAD_SIZE_BYTES. Kept as a literal rather than imported from
@@ -44,20 +57,9 @@ CATEGORIES = (
     "proposals",
     "analytics_bi",
     "technical_methodology",
+    "project_documentation",
+    "general",
 )
-
-# How many documents each category may contribute. The corpus holds far more
-# than an MVP needs — 60-odd capability statements alone, most of them the same
-# document at different dates. The cap forces a choice; `_PRIORITY` below makes
-# that choice the same one every time, and every dropped file is recorded with
-# the reason it lost.
-CATEGORY_CAPS = {
-    "capabilities": 20,
-    "past_performance": 20,
-    "proposals": 10,
-    "analytics_bi": 18,
-    "technical_methodology": 24,
-}
 
 # Preferred format when the same document exists in several. DOCX first because
 # it carries headings and tables the parser turns into section titles; PDF next
@@ -81,29 +83,44 @@ EXCLUDED_DIRECTORIES: list[tuple[str, str]] = [
     ),
     ("/logo - color palette/", "brand assets, no prose to answer questions from"),
     ("/corrections/", "signed submission forms, superseded by the final submission"),
-    ("/z. archive/", "archive folder"),
-    ("/archive/", "archive folder"),
+    ("/z. archive/", "filed by its author in an archive folder"),
+    ("/archive/", "filed by its author in an archive folder"),
 ]
 
 
 # --- filename rules ------------------------------------------------------
 
-# Order matters: the first pattern that matches decides, and the categories are
-# listed most-sensitive first so that a "Pricing Template" is excluded as
-# pricing rather than as a template.
-SENSITIVE_PATTERNS: list[tuple[str, str]] = [
-    (r"email\s*address|contact\s*list|contacts\b", "contact list"),
-    (r"\bresume|\bcv\b|key team members", "personal resume"),
-    (r"pricing|rate\s*card|\bclin\b|price\s*schedule", "pricing or rate information"),
-    (r"direct\s*deposit|\bw-?9\b|bank\s*details", "financial account details"),
+# Checked before format and size, so that a pricing spreadsheet is counted as
+# pricing rather than disappearing into "unsupported format" — that count is
+# the one someone will want to audit.
+SECRET_PATTERNS: list[tuple[str, str]] = [
+    (r"password|credential|\bsecret\b|api[\s_-]?key|access[\s_-]?token", "credentials"),
+    (r"\bprivate[\s_-]?key\b|\.pem\b|\bkeystore\b", "key material"),
+]
+
+PERSONAL_PATTERNS: list[tuple[str, str]] = [
+    (r"email\s*address|contact\s*list|contacts\b|address\s*book", "contact list"),
+    (r"\bresume|\bcv\b|curriculum vitae|key team members", "personal resume"),
+    (r"direct\s*deposit|\bw-?9\b|bank\s*details|\bssn\b", "personal financial data"),
     (
-        r"incentive model|compensation|\bsalary\b",
-        "internal compensation material",
+        r"incentive model|compensation|\bsalary\b|\bpayroll\b|timesheet",
+        "employee compensation material",
     ),
+]
+
+COMMERCIAL_PATTERNS: list[tuple[str, str]] = [
     (
-        r"representations and certifications|\bsigned\b",
-        "signed contractual form, not knowledge content",
+        r"pricing|rate\s*card|\bclin\b|price\s*schedule|\bcost\s*proposal\b",
+        "pricing or rate information",
     ),
+]
+
+# Ambiguous on the name alone. Not excluded and not ingested: reported for a
+# person to decide, because guessing either way is worse than asking.
+REVIEW_PATTERNS: list[tuple[str, str]] = [
+    (r"\binvoice\b|\bbudget\b|\bfinancials?\b|\bp&l\b", "may contain financial detail"),
+    (r"\bconfidential\b|\bnda\b|proprietary", "marked confidential on its face"),
+    (r"\bpersonnel\b|\bstaffing plan\b", "may name individuals"),
 ]
 
 TEMPLATE_PATTERNS: list[tuple[str, str]] = [
@@ -111,14 +128,6 @@ TEMPLATE_PATTERNS: list[tuple[str, str]] = [
     (r"\bblank\b", "blank form"),
     (r"proposal form", "submission form, not knowledge content"),
     (r"header template|color palette", "layout asset"),
-    (
-        r"meeting notes|work session",
-        "meeting notes rather than a deliverable",
-    ),
-    (
-        r"physical data model",
-        "schema dump: column definitions rather than methodology",
-    ),
 ]
 
 THIRD_PARTY_PATTERNS: list[tuple[str, str]] = [
@@ -160,47 +169,65 @@ _VERSION_TOKENS = (
     re.compile(r"^(?P<base>.{5,}?)[\s_-]+(?P<num>\d+[._]\d+(?:[._]\d+)*)$"),
 )
 
-# The capability story has to be current: an MVP that answers "what does
-# SunRadia do?" from a 2022 one-pager is worse than one that declines. Anything
-# in this category older than this, where the year can be established at all,
-# is treated as superseded.
-CURRENT_CAPABILITY_YEAR = 2025
-
-# Undated capability documents kept anyway, because each addresses an audience
-# no current-year document covers and there is no newer equivalent to prefer.
-DISTINCT_UNDATED_CAPABILITIES = (
-    "sun radia govt capabilities",
-    "sun radia capabilities statement - commercial",
-    "sun radia capability statement",
-)
-
 
 # --- categories ----------------------------------------------------------
 
 # Evaluated in order against the lowercased relative path; first match wins.
+# The last rule is a catch-all: a first-party document that survived every
+# exclusion belongs in the knowledge base whether or not its name fits a
+# category, and `general` says so honestly rather than dropping it.
 CATEGORY_RULES: list[tuple[str, str]] = [
     (
         r"case stud|past performance|\brtr\b|sf-?dart|performance requirements",
         "past_performance",
     ),
     (
-        r"rfp|rfq|rfi|proposal|solicitation|final submission|submission folder|\bsow\b",
+        r"rfp|rfq|rfi|proposal|solicitation|final submission|submission folder"
+        r"|\bsow\b|statement of work|\bpws\b|sources sought|offerors",
         "proposals",
     ),
     (
         r"analytics|power\s*bi|\bbi\b|tableau|quicksight|datastage|data lineage"
-        r"|dashboard|reporting",
+        r"|dashboard|reporting|\betl\b|visuali[sz]",
         "analytics_bi",
     ),
     (
         r"data governance|\bdg\b|\bmdm\b|\bepim\b|\bedg\b|\becm\b|data quality"
-        r"|data model|taxonomy|architecture|stewardship|metadata|master data",
+        r"|data model|taxonomy|architecture|stewardship|metadata|master data"
+        r"|data integration|conceptual|logical|physical|standards|framework",
         "technical_methodology",
     ),
-    (r"capabilit|one\s*pager|whitepaper|white paper|flyer", "capabilities"),
+    (
+        r"project plan|readiness assessment|roadmap|work session|workshop"
+        r"|status report|deliverable|charter|kick-?off|lessons learned",
+        "project_documentation",
+    ),
+    (
+        r"capabilit|one\s*pager|whitepaper|white paper|flyer|overview|offering"
+        r"|who we are|what do we do|services",
+        "capabilities",
+    ),
 ]
 
 _YEAR_IN_NAME = re.compile(r"(?<!\d)(20[0-2]\d)(?!\d)")
+
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10,
+    "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}  # fmt: skip
+_MONTH_IN_NAME = re.compile(
+    r"\b(" + "|".join(sorted(_MONTHS, key=len, reverse=True)) + r")\b", re.I
+)
+
+# Words that distinguish one issue of a document from another rather than one
+# document from another. Stripped to find the family a file belongs to.
+_EDITION_WORDS = re.compile(
+    r"\b(final|new|old|latest|draft|revised|updated|copy|version|v\d+(\.\d+)*"
+    r"|20[0-2]\d|" + "|".join(_MONTHS) + r")\b",
+    re.I,
+)
 
 
 @dataclass
@@ -214,30 +241,36 @@ class Record:
     category: str | None = None
     brand: str = "Unknown"
     year: int | None = None
+    month: int | None = None
+    outcome: str = "include"
     reason: str = ""
+    duplicate_of: str | None = None
+    superseded_by: str | None = None
     content_hash: str | None = None
     rank: tuple = field(default=(), repr=False, compare=False)
 
-    def as_include(self) -> dict:
-        return {
+    def as_entry(self) -> dict:
+        entry = {
             "path": self.path,
+            "included": self.outcome == "include",
             "category": self.category,
             "brand": self.brand,
-            "year": self.year,
-            "extension": self.extension,
+            "file_type": self.extension.lstrip("."),
             "size_bytes": self.size_bytes,
-            "content_hash": self.content_hash,
-            "reason": self.reason,
+            "year": self.year,
+            "selection_reason": self.reason if self.outcome == "include" else None,
+            "exclusion_reason": self.reason if self.outcome != "include" else None,
+            "duplicate_of": self.duplicate_of,
+            "superseded_by": self.superseded_by,
         }
 
-    def as_exclude(self) -> dict:
-        return {
-            "path": self.path,
-            "category": self.category,
-            "extension": self.extension,
-            "size_bytes": self.size_bytes,
-            "reason": self.reason,
-        }
+        if self.outcome == "include":
+            entry["content_hash"] = self.content_hash
+
+        if self.outcome == "review":
+            entry["outcome"] = "review"
+
+        return entry
 
 
 def _first_match(name: str, rules: list[tuple[str, str]]) -> str | None:
@@ -248,8 +281,8 @@ def _first_match(name: str, rules: list[tuple[str, str]]) -> str | None:
     return None
 
 
-def derive_year(relative_path: str) -> int | None:
-    """The document's year from its name or folder, or None.
+def derive_date(relative_path: str) -> tuple[int | None, int | None]:
+    """The document's year and month from its name or folder, or (None, None).
 
     Never from the filesystem. OneDrive rewrote every modification time in this
     corpus, so mtime records when a file synced, not when it was authored, and
@@ -257,18 +290,23 @@ def derive_year(relative_path: str) -> int | None:
     """
 
     parts = PurePosixPath(relative_path).parts
-    # Filename first: "Capabilities Statement June 2026" beats the folder it
+    name = parts[-1]
+
+    # The filename first: "Capabilities Statement June 2026" beats the folder it
     # happens to be filed under.
-    years = _YEAR_IN_NAME.findall(parts[-1])
+    years = _YEAR_IN_NAME.findall(name)
     if years:
-        return max(int(year) for year in years)
+        month = _MONTH_IN_NAME.search(name)
+        return max(int(year) for year in years), (
+            _MONTHS[month.group(1).lower()] if month else None
+        )
 
     for part in reversed(parts[:-1]):
         years = _YEAR_IN_NAME.findall(part)
         if years and "earlier" not in part.lower():
-            return max(int(year) for year in years)
+            return max(int(year) for year in years), None
 
-    return None
+    return None, None
 
 
 def derive_brand(relative_path: str) -> str:
@@ -290,8 +328,34 @@ def derive_brand(relative_path: str) -> str:
     return "Unknown"
 
 
-def categorise(relative_path: str) -> str | None:
-    return _first_match(relative_path, CATEGORY_RULES)
+def categorise(relative_path: str) -> str:
+    """Categorise on the filename first, then on the folders above it.
+
+    The corpus is filed under a top-level `capabilities/` folder, so matching
+    the whole path would file every technical deliverable and every case study
+    under it as a capability statement. The filename is what the author called
+    the document; the folder is only where it ended up.
+    """
+
+    path = PurePosixPath(relative_path)
+
+    return (
+        _first_match(path.stem, CATEGORY_RULES)
+        or _first_match(str(path.parent), CATEGORY_RULES)
+        or "general"
+    )
+
+
+def document_family(stem: str) -> str:
+    """The document a file is an issue of, ignoring date and edition words.
+
+    `Sun Radia Capabilities Statement - Final June 2024` and `... Mar 2026` are
+    the same document reissued. Collapsing them is what lets the newest win
+    without a hand-maintained list of which one is current.
+    """
+
+    without_edition = _EDITION_WORDS.sub(" ", stem.lower())
+    return re.sub(r"[^a-z0-9]+", " ", without_edition).strip()
 
 
 def _hash_file(path: Path) -> str:
@@ -304,60 +368,47 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def screen(record: Record) -> str | None:
-    """Return the reason this file is excluded, or None to keep considering it.
+def screen(record: Record) -> tuple[str, str] | None:
+    """Return `(outcome, reason)` if this file is not plainly includable.
 
-    Cheap rules only — nothing here opens a file.
-
-    Sensitivity is tested first, ahead of format and size. A pricing schedule
-    that happens to be a spreadsheet would be excluded either way, but recorded
-    as "unsupported format" it would vanish from the count of sensitive
-    material — and that count is the one someone will want to audit.
+    Cheap rules only — nothing here opens a file. Sensitivity is tested ahead
+    of format so that a pricing spreadsheet is recorded as pricing rather than
+    as an unreadable file.
     """
 
     stem = PurePosixPath(record.path).stem.lower()
 
-    reason = _first_match(stem, SENSITIVE_PATTERNS)
+    for rules in (SECRET_PATTERNS, PERSONAL_PATTERNS, COMMERCIAL_PATTERNS):
+        reason = _first_match(stem, rules)
+        if reason:
+            return "exclude", reason
+
+    reason = _first_match(stem, REVIEW_PATTERNS)
     if reason:
-        return reason
+        return "review", reason
 
     if record.extension not in SUPPORTED_EXTENSIONS:
-        return f"unsupported format ({record.extension or 'no extension'})"
+        return "exclude", f"unsupported format ({record.extension or 'no extension'})"
 
     if record.size_bytes == 0:
-        return "empty file, or a OneDrive placeholder that is not downloaded"
+        return "exclude", "empty file, or a OneDrive placeholder not downloaded"
 
     if record.size_bytes > MAX_UPLOAD_BYTES:
-        return (
+        return "exclude", (
             f"exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB upload limit "
             f"({record.size_bytes // (1024 * 1024)} MiB)"
         )
 
-    lowered = record.path.lower()
+    lowered = f"/{record.path.lower()}"
 
     for fragment, reason in EXCLUDED_DIRECTORIES:
-        if fragment in f"/{lowered}":
-            return reason
+        if fragment in lowered:
+            return "exclude", reason
 
     for rules in (TEMPLATE_PATTERNS, THIRD_PARTY_PATTERNS):
         reason = _first_match(stem, rules)
         if reason:
-            return reason
-
-    if record.category is None:
-        return "outside the five MVP knowledge categories"
-
-    if record.category == "capabilities":
-        if record.year is not None and record.year < CURRENT_CAPABILITY_YEAR:
-            return (
-                f"superseded capability material from {record.year}; "
-                f"{CURRENT_CAPABILITY_YEAR}+ versions exist"
-            )
-
-        if record.year is None and not any(
-            marker in stem for marker in DISTINCT_UNDATED_CAPABILITIES
-        ):
-            return "undated capability material with no distinct audience"
+            return "exclude", reason
 
     return None
 
@@ -387,13 +438,22 @@ def version_family(stem: str) -> tuple[str, tuple[int, ...]] | None:
     return None
 
 
-def collapse_variants(candidates: list[Record]) -> tuple[list[Record], list[Record]]:
-    """Drop marked copies and older versions of documents we already have.
+def _issue_key(record: Record) -> tuple[int, int]:
+    return (record.year or 0, record.month or 0)
 
-    Both rules need to see the whole candidate set, which is why they are not
-    in `screen()`: whether `X (2).pdf` is a duplicate depends entirely on
-    whether `X.pdf` survived, and which version of a deliverable is newest
-    depends on what the other versions are.
+
+def collapse_variants(candidates: list[Record]) -> tuple[list[Record], list[Record]]:
+    """Drop marked copies, older versions, and superseded issues.
+
+    All three rules need to see the whole candidate set, which is why they are
+    not in `screen()`: whether `X (2).pdf` is a duplicate depends entirely on
+    whether `X.pdf` survived, and which issue of a document is current depends
+    on what the other issues are.
+
+    Only *dated* issues supersede each other. A document with no derivable date
+    is never dropped in favour of one that has a date — the corpus is full of
+    undated files that are not reissues of anything, and losing a case study to
+    a date-guessing rule is the expensive mistake here.
     """
 
     by_stem: dict[str, str] = {}
@@ -404,104 +464,198 @@ def collapse_variants(candidates: list[Record]) -> tuple[list[Record], list[Reco
     dropped: list[Record] = []
 
     for record in candidates:
-        stem = PurePosixPath(record.path).stem.strip()
-        marker = strip_variant_marker(stem)
+        marker = strip_variant_marker(PurePosixPath(record.path).stem.strip())
 
         if marker and marker[0].lower() in by_stem:
-            record.reason = f"{marker[1]} of {by_stem[marker[0].lower()]}"
+            record.outcome = "exclude"
+            record.reason = f"{marker[1]} of another selected file"
+            record.duplicate_of = by_stem[marker[0].lower()]
             dropped.append(record)
             continue
 
         kept.append(record)
 
-    # Newest version per family wins; the rest are recorded against it.
-    newest: dict[str, tuple[tuple[int, ...], Record]] = {}
+    # Newest numbered version per family, within one directory.
+    newest_version: dict[str, tuple[tuple[int, ...], Record]] = {}
     for record in kept:
         family = version_family(PurePosixPath(record.path).stem)
         if not family:
             continue
 
         key = f"{PurePosixPath(record.path).parent}:{family[0]}"
-        current = newest.get(key)
+        current = newest_version.get(key)
         if current is None or family[1] > current[0]:
-            newest[key] = (family[1], record)
+            newest_version[key] = (family[1], record)
 
     survivors: list[Record] = []
     for record in kept:
         family = version_family(PurePosixPath(record.path).stem)
         if family:
             key = f"{PurePosixPath(record.path).parent}:{family[0]}"
-            winner = newest[key][1]
+            winner = newest_version[key][1]
             if winner is not record:
-                record.reason = f"superseded by {winner.path}"
+                record.outcome = "exclude"
+                record.reason = "an explicitly numbered later version exists"
+                record.superseded_by = winner.path
                 dropped.append(record)
                 continue
 
         survivors.append(record)
 
-    return survivors, dropped
+    # Newest dated issue per document family, across the whole corpus. This is
+    # what stops sixty reissues of one capability statement from all landing in
+    # the knowledge base; it does not touch anything undated.
+    newest_issue: dict[str, Record] = {}
+    for record in survivors:
+        if record.year is None:
+            continue
+
+        family = f"{record.category}:{document_family(PurePosixPath(record.path).stem)}"
+        current = newest_issue.get(family)
+        if current is None or _issue_key(record) > _issue_key(current):
+            newest_issue[family] = record
+
+    current_issues: list[Record] = []
+    for record in survivors:
+        if record.year is not None:
+            family = (
+                f"{record.category}:{document_family(PurePosixPath(record.path).stem)}"
+            )
+            winner = newest_issue[family]
+            if winner is not record and _issue_key(winner) > _issue_key(record):
+                record.outcome = "exclude"
+                record.reason = (
+                    f"superseded issue of the same document; "
+                    f"{winner.year}-{winner.month or 0:02d} is current"
+                )
+                record.superseded_by = winner.path
+                dropped.append(record)
+                continue
+
+        current_issues.append(record)
+
+    return current_issues, dropped
 
 
 def _priority(record: Record) -> tuple:
-    """Ordering within a category: newest first, then best format, then the
-    shallowest path — which is reliably the filed copy rather than a copy left
-    in a working subfolder."""
+    """Ordering within a family: newest first, then the format that carries the
+    most provenance, then the shallowest path — reliably the filed copy rather
+    than one left behind in a working subfolder."""
 
     return (
         -(record.year or 0),
+        -(record.month or 0),
         _FORMAT_RANK.get(record.extension, 9),
         record.path.count("/"),
         record.path,
     )
 
 
+def unsupported_report(records: list[Record]) -> dict:
+    """What is being left behind, and whether it is worth converting.
+
+    A knowledge base is not complete because everything readable was read. This
+    is the list of what a later conversion phase would have to reach, ranked so
+    that the argument for doing it is visible.
+    """
+
+    unsupported = [
+        record
+        for record in records
+        if record.outcome == "exclude" and record.reason.startswith("unsupported")
+    ]
+
+    by_extension: dict[str, dict] = {}
+    for record in unsupported:
+        entry = by_extension.setdefault(
+            record.extension or "(none)",
+            {"count": 0, "bytes": 0, "categories": defaultdict(int), "high_value": []},
+        )
+        entry["count"] += 1
+        entry["bytes"] += record.size_bytes
+        entry["categories"][record.category or "general"] += 1
+
+    # High value means: it survived every rule except the format one, and it is
+    # big enough to hold something worth converting. Listed largest first,
+    # capped per format so the report stays readable.
+    for record in sorted(unsupported, key=lambda r: -r.size_bytes):
+        if record.size_bytes < 200 * 1024:
+            continue
+
+        entry = by_extension[record.extension or "(none)"]
+        if len(entry["high_value"]) < 25:
+            entry["high_value"].append(
+                {
+                    "path": record.path,
+                    "category": record.category,
+                    "size_bytes": record.size_bytes,
+                    "year": record.year,
+                }
+            )
+
+    return {
+        extension: {
+            "count": entry["count"],
+            "bytes": entry["bytes"],
+            "categories": dict(sorted(entry["categories"].items())),
+            "high_value_examples": entry["high_value"],
+        }
+        for extension, entry in sorted(
+            by_extension.items(), key=lambda item: -item[1]["count"]
+        )
+    }
+
+
 def build(corpus: Path, recorded_root: str | None = None) -> dict:
-    included: list[Record] = []
-    excluded: list[Record] = []
+    candidates: list[Record] = []
+    decided: list[Record] = []
 
     for path in sorted(
         (entry for entry in corpus.rglob("*") if entry.is_file()),
         key=lambda entry: entry.as_posix(),
     ):
         relative = path.relative_to(corpus).as_posix()
+        year, month = derive_date(relative)
         record = Record(
             path=relative,
             filename=path.name,
             extension=path.suffix.lower(),
             size_bytes=path.stat().st_size,
             brand=derive_brand(relative),
-            year=derive_year(relative),
+            year=year,
+            month=month,
         )
         record.category = categorise(relative)
 
-        reason = screen(record)
-        if reason:
-            record.reason = reason
-            excluded.append(record)
+        verdict = screen(record)
+        if verdict:
+            record.outcome, record.reason = verdict
+            decided.append(record)
             continue
 
-        included.append(record)
+        candidates.append(record)
 
-    included, dropped = collapse_variants(included)
-    excluded.extend(dropped)
+    candidates, dropped = collapse_variants(candidates)
+    decided.extend(dropped)
 
     # Only survivors are hashed. Reading 800 files over a synced network folder
-    # to find duplicates among the 150 that matter is time spent for nothing.
-    for record in included:
+    # to find duplicates among the few hundred that matter is time for nothing.
+    for record in candidates:
         record.content_hash = _hash_file(corpus / record.path)
 
-    included.sort(key=_priority)
+    candidates.sort(key=_priority)
 
-    kept: list[Record] = []
+    included: list[Record] = []
     seen_hashes: dict[str, str] = {}
     seen_documents: dict[str, str] = {}
-    counts: dict[str, int] = defaultdict(int)
 
-    for record in included:
+    for record in candidates:
         duplicate_of = seen_hashes.get(record.content_hash or "")
         if duplicate_of:
-            record.reason = f"byte-identical to {duplicate_of}"
-            excluded.append(record)
+            record.outcome = "exclude"
+            record.reason = "byte-identical to another selected file"
+            record.duplicate_of = duplicate_of
+            decided.append(record)
             continue
 
         # The same document exported twice — "X.docx" and "X.pdf". Same words,
@@ -509,51 +663,57 @@ def build(corpus: Path, recorded_root: str | None = None) -> dict:
         document_key = f"{record.category}:{PurePosixPath(record.path).stem.lower()}"
         twin = seen_documents.get(document_key)
         if twin:
-            record.reason = f"same document as {twin}, in a less useful format"
-            excluded.append(record)
+            record.outcome = "exclude"
+            record.reason = "the same document in a format that carries less"
+            record.duplicate_of = twin
+            decided.append(record)
             continue
 
-        if counts[record.category] >= CATEGORY_CAPS[record.category]:
-            record.reason = (
-                f"{record.category} cap of {CATEGORY_CAPS[record.category]} reached; "
-                "ranked below the documents kept"
-            )
-            excluded.append(record)
-            continue
-
-        record.reason = f"{record.category}: selected for the MVP knowledge base"
+        record.outcome = "include"
+        record.reason = f"{record.category}: first-party knowledge, readable today"
         seen_hashes[record.content_hash or ""] = record.path
         seen_documents[document_key] = record.path
-        counts[record.category] += 1
-        kept.append(record)
+        included.append(record)
 
-    kept.sort(key=lambda record: record.path)
+    review = [record for record in decided if record.outcome == "review"]
+    excluded = [record for record in decided if record.outcome == "exclude"]
+
+    included.sort(key=lambda record: record.path)
     excluded.sort(key=lambda record: record.path)
+    review.sort(key=lambda record: record.path)
+
+    counts: dict[str, int] = defaultdict(int)
+    for record in included:
+        counts[record.category or "general"] += 1
 
     return {
         "corpus_root": recorded_root or str(corpus),
         "supported_extensions": sorted(SUPPORTED_EXTENSIONS),
         "max_upload_bytes": MAX_UPLOAD_BYTES,
-        "category_caps": CATEGORY_CAPS,
         "summary": {
-            "files_inspected": len(kept) + len(excluded),
-            "included": len(kept),
+            "files_inspected": len(included) + len(excluded) + len(review),
+            "included": len(included),
             "excluded": len(excluded),
+            "needs_review": len(review),
             "included_by_category": {
-                category: counts[category] for category in CATEGORIES
+                category: counts[category]
+                for category in CATEGORIES
+                if counts[category]
             },
             "included_by_extension": {
-                extension: sum(1 for r in kept if r.extension == extension)
-                for extension in sorted({r.extension for r in kept})
+                extension: sum(1 for r in included if r.extension == extension)
+                for extension in sorted({r.extension for r in included})
             },
             "included_by_brand": {
-                brand: sum(1 for r in kept if r.brand == brand)
-                for brand in sorted({r.brand for r in kept})
+                brand: sum(1 for r in included if r.brand == brand)
+                for brand in sorted({r.brand for r in included})
             },
-            "included_bytes": sum(r.size_bytes for r in kept),
+            "included_bytes": sum(r.size_bytes for r in included),
         },
-        "include": [record.as_include() for record in kept],
-        "exclude": [record.as_exclude() for record in excluded],
+        "unsupported_formats": unsupported_report(excluded),
+        "include": [record.as_entry() for record in included],
+        "review": [record.as_entry() for record in review],
+        "exclude": [record.as_entry() for record in excluded],
     }
 
 
@@ -561,28 +721,42 @@ def print_summary(manifest: dict) -> None:
     summary = manifest["summary"]
     print(f"  files inspected : {summary['files_inspected']}")
     print(f"  selected        : {summary['included']}")
+    print(f"  needs review    : {summary['needs_review']}")
     print(f"  excluded        : {summary['excluded']}")
     print(f"  selected bytes  : {summary['included_bytes'] / (1024 * 1024):.1f} MiB")
 
-    print("\n  by category:")
-    for category, count in summary["included_by_category"].items():
-        print(f"    {category:<24} {count:>4}")
-
-    print("\n  by extension:")
-    for extension, count in summary["included_by_extension"].items():
-        print(f"    {extension:<24} {count:>4}")
-
-    print("\n  by brand:")
-    for brand, count in summary["included_by_brand"].items():
-        print(f"    {brand:<24} {count:>4}")
+    for label, key in (
+        ("by category", "included_by_category"),
+        ("by extension", "included_by_extension"),
+        ("by brand", "included_by_brand"),
+    ):
+        print(f"\n  {label}:")
+        for name, count in summary[key].items():
+            print(f"    {name:<26} {count:>4}")
 
     reasons: dict[str, int] = defaultdict(int)
     for entry in manifest["exclude"]:
-        reasons[re.sub(r"\d+", "N", entry["reason"])] += 1
+        reasons[re.sub(r"\d+", "N", entry["exclusion_reason"] or "")] += 1
 
-    print("\n  top exclusion reasons:")
-    for reason, count in sorted(reasons.items(), key=lambda item: -item[1])[:15]:
-        print(f"    {count:>4}  {reason[:88]}")
+    print("\n  exclusion reasons:")
+    for reason, count in sorted(reasons.items(), key=lambda item: -item[1]):
+        print(f"    {count:>4}  {reason[:86]}")
+
+    print("\n  unsupported formats left behind:")
+    for extension, entry in manifest["unsupported_formats"].items():
+        categories = ", ".join(
+            f"{name} {count}" for name, count in entry["categories"].items()
+        )
+        print(
+            f"    {extension:<10} {entry['count']:>4} files  "
+            f"{entry['bytes'] / (1024 * 1024):>7.1f} MiB  "
+            f"high-value {len(entry['high_value_examples']):>3}   {categories[:60]}"
+        )
+
+    if manifest["review"]:
+        print("\n  flagged for review, not ingested:")
+        for entry in manifest["review"]:
+            print(f"    {entry['exclusion_reason'][:34]:<36} {entry['path'][:70]}")
 
 
 def main() -> int:

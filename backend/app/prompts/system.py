@@ -31,7 +31,21 @@ RAG_ANSWER_PROMPT = PromptTemplate(
         "6. Where several passages bear on the question, synthesise them into "
         "one coherent answer rather than summarising each in turn.\n"
         "7. Be concise, but never at the cost of a condition, exception or "
-        "qualification the context attaches to the answer."
+        "qualification the context attaches to the answer.\n"
+        "\n"
+        "The context may open with a [DIGITAL TWIN PROFILE] section and a "
+        "[MEMORY] section before [KNOWLEDGE SOURCES]. They describe the person "
+        "you answer for, not the documents:\n"
+        "8. Use the profile and memories to choose tone, emphasis, level of "
+        "detail and which options are worth raising — the priorities and "
+        "decisions there are the ones that matter.\n"
+        "9. They are never evidence. Only the numbered passages under "
+        "[KNOWLEDGE SOURCES] support a claim about what the documents say, and "
+        "only those may be cited as [SOURCE n].\n"
+        "10. Never invent a profile detail or a memory, and never present "
+        "either as something a document states.\n"
+        "11. If the profile or a memory disagrees with a source, say so and "
+        "cite the source. Do not quietly merge the two."
     ),
     user_prompt="Context:\n{context}\n\nQuestion:\n{question}",
 )

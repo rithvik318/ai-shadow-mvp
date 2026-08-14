@@ -159,8 +159,14 @@ def verify(expected_filenames: set[str]) -> dict:
 
         present = {d.filename for d in documents}
 
+        seen: dict[str, int] = {}
+        for document in documents:
+            seen[document.filename] = seen.get(document.filename, 0) + 1
+        duplicates = sorted(name for name, count in seen.items() if count > 1)
+
         return {
             "documents_in_database": len(documents),
+            "duplicate_filenames": duplicates,
             "documents_by_status": by_status,
             "total_chunks": sum(count for count, _ in chunks_by_document.values()),
             "orphan_chunks": orphans,
@@ -179,6 +185,7 @@ def print_verification(report: dict) -> None:
     print(f"  orphan chunks            : {report['orphan_chunks']}")
 
     for label, key in (
+        ("ingested twice", "duplicate_filenames"),
         ("indexed with no chunks", "indexed_without_chunks"),
         ("chunks missing embeddings", "chunks_missing_embeddings"),
         ("chunk_count disagrees", "chunk_count_disagrees_with_rows"),
@@ -221,6 +228,15 @@ def main() -> int:
         help="skip ingestion and only check the database against the manifest",
     )
     parser.add_argument(
+        "--include-review",
+        action="store_true",
+        help=(
+            "also ingest the files the manifest flagged for review. Read them "
+            "first: they were flagged because their names suggest something "
+            "the knowledge base may not be the right place for."
+        ),
+    )
+    parser.add_argument(
         "--reingest",
         action="store_true",
         help="upload even documents whose filename is already indexed",
@@ -235,7 +251,10 @@ def main() -> int:
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     corpus = Path(arguments.corpus or manifest["corpus_root"])
-    selected = manifest["include"]
+    selected = list(manifest["include"])
+    if arguments.include_review:
+        selected += manifest.get("review", [])
+        selected.sort(key=lambda entry: entry["path"])
     if arguments.limit is not None:
         selected = selected[: arguments.limit]
 
@@ -253,7 +272,12 @@ def main() -> int:
     print(f"KNOWLEDGE BASE INGESTION — {len(selected)} selected documents")
     print("=" * 78)
 
-    already = set() if arguments.reingest else indexed_filenames(arguments.base_url)
+    # A dry run must not need a server: it answers "what would be sent", and
+    # the only thing the API adds is which names are already indexed — which is
+    # exactly what a dry run is allowed not to know.
+    already: set[str] = set()
+    if not arguments.reingest and not arguments.dry_run:
+        already = indexed_filenames(arguments.base_url)
 
     results: list[dict] = []
     skipped: list[dict] = []

@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     RETRIEVAL_TOP_K: int = 5
     RETRIEVAL_SIMILARITY_THRESHOLD: float | None = 0.0
 
+    # How many active memories may shape one answer, and how much of the chat
+    # context the profile and those memories may occupy. The persona block is
+    # taken out of CHAT_CONTEXT_MAX_CHARS rather than added to it, so adding a
+    # Digital Twin cannot grow the prompt past the bound already in place.
+    MAX_MEMORIES_IN_CONTEXT: int = 8
+    PERSONA_CONTEXT_MAX_CHARS: int = 2000
+
     LLM_PROVIDER: str = "openrouter"
     LLM_MODEL: str = "openai/gpt-oss-20b"
     OPENAI_API_KEY: str | None = None

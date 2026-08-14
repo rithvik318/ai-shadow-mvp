@@ -32,6 +32,11 @@ from app.core.exceptions import EmptyQueryError
 from app.prompts.builder import PromptBuilder
 from app.prompts.registry import PromptRegistry
 from app.services.features.chat.context_service import build_context
+from app.services.features.digital_twin import memory_service, profile_service
+from app.services.features.digital_twin.persona_service import (
+    KNOWLEDGE_HEADING,
+    build_persona_context,
+)
 from app.services.features.retrieval import retrieval_service
 from app.services.features.retrieval.retrieval_service import UNSET
 from app.services.llm.llm_service import llm_service
@@ -67,6 +72,21 @@ class ChatAnswer:
     answer: str
     sources: list[ChatSource]
     retrieved_chunks: int
+
+
+def _compose(persona: str, knowledge: str) -> str:
+    """Put the persona above the passages, under headings that separate them.
+
+    With no persona the knowledge text is passed through untouched — the same
+    string this service built before the Digital Twin existed. The heading is
+    only introduced when there is something above it to distinguish it from,
+    because a lone `[KNOWLEDGE SOURCES]` label separates nothing.
+    """
+
+    if not persona:
+        return knowledge
+
+    return f"{persona}\n\n{KNOWLEDGE_HEADING}\n{knowledge}"
 
 
 def answer_question(
@@ -106,7 +126,21 @@ def answer_question(
         )
         return ChatAnswer(answer=NO_CONTEXT_ANSWER, sources=[], retrieved_chunks=0)
 
-    context = build_context(chunks, max_chars=settings.CHAT_CONTEXT_MAX_CHARS)
+    # Loaded only once retrieval has found something: with nothing to answer
+    # from, the reply is fixed and neither the profile nor the memories change
+    # it, so reading them would be two queries spent on a constant.
+    persona = build_persona_context(
+        profile_service.find_profile(db, user_id=user_id),
+        memory_service.active_memories(db, user_id=user_id),
+        max_chars=settings.PERSONA_CONTEXT_MAX_CHARS,
+    )
+
+    # The persona block is taken *out of* the existing budget rather than added
+    # to it, so a Digital Twin cannot grow the prompt past the bound that was
+    # already there. With no profile and no memories the block is empty and the
+    # knowledge context is built against exactly the budget it had before.
+    knowledge_budget = max(settings.CHAT_CONTEXT_MAX_CHARS - len(persona.text), 0)
+    context = build_context(chunks, max_chars=knowledge_budget)
 
     if len(context.chunks) < len(chunks):
         logger.info(
@@ -120,7 +154,7 @@ def answer_question(
 
     messages = PromptBuilder.build(
         PromptRegistry.get(RAG_PROMPT_NAME),
-        context=context.text,
+        context=_compose(persona.text, context.text),
         question=question.strip(),
     )
 
