@@ -57,6 +57,25 @@ Chunks are stored with the page number and section heading they came from, which
 
 A document reaches `status="indexed"` only once every chunk carries a vector. That matters because a document without vectors is invisible to similarity search, and would otherwise surface to the user as "nothing relevant found" rather than as a failure.
 
+### Building the knowledge base
+
+A real corpus is not all worth indexing: duplicates, superseded reissues, contact lists, pricing, other firms' material. Two scripts turn one into a knowledge base without touching the source folder.
+
+```bash
+cd backend
+python -m scripts.build_kb_manifest --corpus "D:/ai-shadow-knowledgebase"
+python -m scripts.ingest_kb_manifest              # --dry-run first, if you like
+python -m scripts.ingest_kb_manifest --verify-only
+```
+
+The first walks the corpus read-only and writes `knowledge_base_manifest.json`: every file is recorded as included, excluded or needing review, with the reason, its category, its brand, its year, and — where it applies — the file it duplicates or the file that superseded it. Years come from the filename or folder, never from the modification time, which OneDrive rewrote across this corpus. Running it twice on the same corpus produces byte-identical output, so the selection is reviewable rather than remembered.
+
+The policy is inclusive: everything first-party and readable is selected unless a rule excludes it, and there are no per-category limits. A file is only dropped for being unreadable today, sensitive, a template or form, another organisation's material, a byte-identical duplicate, or a superseded issue of a document that is also selected. Anything sensitive-looking but ambiguous goes to a third bucket, `review`, and is neither ingested nor silently dropped — read those and pass `--include-review` if they belong.
+
+The manifest also reports what it had to leave behind, by format, with the largest candidates named. That list is the honest measure of how complete the knowledge base is: legacy `.doc`, `.ppt` and `.vsd` files hold real material the parser cannot read yet.
+
+The second script sends only the selected files through `POST /documents/upload`, skips anything already indexed so a re-run resumes rather than duplicates, continues past any individual failure, then checks the database: what is indexed, what has chunks, whether any chunk is missing its vector, whether the same filename arrived twice, whether anything is present that the manifest never asked for. Results land in `knowledge_base_ingestion_results.json` — a run artifact, not committed — and the exit code is non-zero if anything failed.
+
 ### Documents that need embedding
 
 Documents ingested before embedding existed, and uploads whose embedding call failed, have chunks but no vectors:
@@ -222,6 +241,55 @@ Nothing found is `200` with an empty `results` and `retrieved_count: 0`, never `
 | `422` | Blank query, or `top_k` out of range |
 | `502` | The embedding provider failed |
 
+### `GET /profile`, `PUT /profile`
+
+Who the Shadow answers for. One profile; `404` until it is written.
+
+```bash
+curl -X PUT http://localhost:8000/profile \
+     -H "Content-Type: application/json" \
+     -d '{"name": "Test Executive", "role": "CEO", "organization": "SunRadia",
+          "communication_style": "Concise and executive-friendly",
+          "priorities": ["Government opportunities", "Enterprise AI"]}'
+```
+
+A `PUT` updates the fields it carries and leaves the rest alone, so correcting one does not mean resending the profile. `name`, `role` and `organization` are required on the first write and return `422` if absent.
+
+### `GET /memory`, `POST /memory`, `PATCH /memory/{id}`, `DELETE /memory/{id}`
+
+Durable things worth remembering. Types: `fact`, `preference`, `decision`, `commitment`, `context`. Importance runs 1–5.
+
+```bash
+curl -X POST http://localhost:8000/memory \
+     -H "Content-Type: application/json" \
+     -d '{"type": "decision", "content": "Prioritize government-sector opportunities.", "importance": 5}'
+```
+
+`GET /memory` takes `type` and `active` filters and returns everything most important first, retired memories included — it is the management view. `PATCH` with `{"active": false}` retires a memory, which is usually what is wanted: a decision that no longer applies is still a thing that was decided. `DELETE` is for the memory that should never have been stored.
+
+Nothing writes memories except this endpoint. There is no extraction from chat and none from ingested documents.
+
+### How the Digital Twin reaches an answer
+
+`POST /chat` loads the profile and the most important active memories and places them above the retrieved passages:
+
+```
+[DIGITAL TWIN PROFILE]
+Role: CEO
+Priorities: Government opportunities; Enterprise AI
+Communication style: Concise and executive-friendly
+
+[MEMORY]
+[DECISION] Prioritize government-sector opportunities.
+
+[KNOWLEDGE SOURCES]
+[SOURCE 1]
+Document: capabilities.pdf
+...
+```
+
+The profile and the memories decide tone, emphasis and which options are worth raising. They are never evidence: only the numbered passages can be cited as `[SOURCE n]`, and `sources` in the response is still built from retrieved chunks alone. The persona block is capped by `PERSONA_CONTEXT_MAX_CHARS` and comes *out of* `CHAT_CONTEXT_MAX_CHARS`, so adding a Digital Twin cannot make the prompt bigger than it already was. With no profile and no memories, the context is exactly what it was before the feature existed.
+
 ### `GET /health`, `GET /`
 
 Liveness probe and service information.
@@ -252,6 +320,8 @@ Set in `backend/.env`; see [`.env.example`](.env.example) for the full list with
 | `EMBEDDING_BATCH_SIZE` | `64` | Texts per provider call |
 | `RETRIEVAL_TOP_K` | `5` | Chunks returned per search |
 | `RETRIEVAL_SIMILARITY_THRESHOLD` | `0.0` | Cosine-similarity floor in `[-1, 1]`; leave empty to disable. Needs tuning on real documents |
+| `MAX_MEMORIES_IN_CONTEXT` | `8` | Active memories that may shape one answer |
+| `PERSONA_CONTEXT_MAX_CHARS` | `2000` | Ceiling on the profile and memory block, taken out of `CHAT_CONTEXT_MAX_CHARS` |
 | `LLM_PROVIDER`, `LLM_MODEL` | `openrouter`, `openai/gpt-oss-20b` | Completions only; not used by ingestion |
 
 Every setting has a working default, so the application and its tests import without a `.env` present.

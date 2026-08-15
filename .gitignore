@@ -31,3 +31,9 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Knowledge-base run artifacts. The manifest is a committed decision; these
+# are outputs of a particular run against a particular database.
+knowledge_base_ingestion_results.json
+corpus_retrieval_results.json
+corpus_validation_results.json

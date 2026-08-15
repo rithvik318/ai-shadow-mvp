@@ -29,6 +29,8 @@ The MVP is one sentence: **users upload documents, the documents are indexed, us
 - Dialect-aware `cosine_distance`, so the retrieval query is exercised by the SQLite suite and verified against real pgvector by an opt-in test.
 - Stateless RAG chat: `POST /chat` answers from retrieved passages through the registered `rag_answer` prompt, returning the passages the model was shown.
 - Retrieval-only search: `POST /search` returns the ranked passages with their text and no model call, so the similarity floor can be judged against real documents.
+- Digital Twin core: a single profile and a typed, explicitly-written memory store, both loaded into every chat above the retrieved passages and clearly separated from them — profile and memory shape tone and priorities, and only documents can be cited.
+- Knowledge-base selection and ingestion: a deterministic manifest chooses which corpus documents belong in the knowledge base and records why for every file, with no per-category limits, and a second script ingests exactly that list through the existing upload endpoint and verifies what landed. Legacy formats the parser cannot read — `.doc`, `.ppt`, `.vsd`, spreadsheets — are reported rather than quietly dropped, and are the largest remaining gap in coverage.
 
 ---
 

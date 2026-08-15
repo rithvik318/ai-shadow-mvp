@@ -46,6 +46,21 @@ A `cosine_distance` construct compiling to pgvector's `<=>` on Postgres and to a
 - **Status:** Implemented
 - **Dependencies:** Semantic Retrieval
 
+### Knowledge Base Selection & Ingestion
+A two-step, reproducible workflow for turning a large mixed corpus into the knowledge base. `python -m scripts.build_kb_manifest --corpus ...` walks the corpus read-only and writes `knowledge_base_manifest.json`, recording every file as included, excluded or needing review, with its reason, category, brand, derived year, and any `duplicate_of` or `superseded_by` relation. Years come from the filename or folder, never from a modification time, which OneDrive rewrote across this corpus. The policy is inclusive and has no per-category limits: a file is dropped only for being unreadable in the current parser, sensitive, a template or form, another organisation's material, a byte-identical duplicate, or a superseded issue of a selected document. The manifest also reports the unsupported formats it left behind, by count, size and largest candidates, so the gap between "ingested" and "complete" is visible. `python -m scripts.ingest_kb_manifest` sends the selected files through the existing upload endpoint, skips what is already indexed so a re-run resumes, continues past individual failures, verifies the database, and writes `knowledge_base_ingestion_results.json`. The source corpus is never modified; exclusion happens at selection time.
+- **Status:** Implemented
+- **Dependencies:** Document Upload & Ingestion
+
+### Digital Twin Profile & Memory
+Who the Shadow answers for, and what it durably knows about them. One profile per owner — name, role, organization, responsibilities, expertise, priorities, decision preferences, current focus and communication style — through `GET /profile` and `PUT /profile`, where a partial write updates the fields supplied and leaves the rest. Memories are typed (`fact`, `preference`, `decision`, `commitment`, `context`), carry an importance from 1 to 5, and can be retired rather than deleted: `GET /memory`, `POST /memory`, `PATCH /memory/{id}`, `DELETE /memory/{id}`, filterable by type and active flag. Every memory is written explicitly through the API; nothing is extracted from chat or from ingested documents.
+- **Status:** Implemented
+- **Dependencies:** Database Connectivity Layer
+
+### Persona-Aware RAG
+`POST /chat` loads the profile and the most important active, unexpired memories and puts them above the retrieved passages, under `[DIGITAL TWIN PROFILE]` and `[MEMORY]` headings, with the passages under `[KNOWLEDGE SOURCES]`. The prompt tells the model to use them for tone, emphasis and priorities but never as evidence: only the numbered passages can be cited as `[SOURCE n]`, and `sources` in the response is still built from retrieved chunks alone. The persona block is bounded by `PERSONA_CONTEXT_MAX_CHARS` and subtracted from `CHAT_CONTEXT_MAX_CHARS` rather than added to it, so a Digital Twin cannot grow the prompt past the bound already in place. With no profile and no memories the assembled context is byte-for-byte what it was before the feature existed. The request and response contracts are unchanged.
+- **Status:** Implemented
+- **Dependencies:** RAG Chat with Citations, Digital Twin Profile & Memory
+
 ### Document Management API
 List documents with status filtering and pagination, retrieve one by id including its failure reason, and delete a document with its chunks. `GET /documents`, `GET /documents/{id}`, `DELETE /documents/{id}`.
 - **Status:** Implemented
