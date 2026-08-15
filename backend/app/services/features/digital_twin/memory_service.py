@@ -9,6 +9,13 @@ Retrieval is deliberately not semantic. The store is small and structured, so
 "the most important active memories" is a sort, not a search. Embedding them
 would add a provider call, an index and a failure mode to a query that already
 returns the right answer.
+
+Every function takes a required `user_id`, and every query in this module
+filters on it — including the lookups behind update and delete, which is what
+makes another user's memory indistinguishable from one that does not exist.
+There is no default owner: a default is a global store that a forgotten
+argument reaches, and one missing keyword should not be the distance between
+two people's memories.
 """
 
 import logging
@@ -19,7 +26,6 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.config.settings import settings
-from app.core.constants import MVP_USER_ID
 from app.core.exceptions import MemoryNotFoundError
 from app.models.digital_twin import DigitalTwinMemory, MemoryType
 
@@ -36,7 +42,7 @@ def create_memory(
     importance: int = 3,
     source: str = "user",
     expires_at: datetime | None = None,
-    user_id: str = MVP_USER_ID,
+    user_id: uuid.UUID,
 ) -> DigitalTwinMemory:
     """Store one memory."""
 
@@ -56,7 +62,7 @@ def create_memory(
     logger.info(
         "digital_twin_memory_created",
         extra={
-            "user_id": user_id,
+            "user_id": str(user_id),
             "memory_id": str(memory.id),
             "type": memory.type.value,
             "importance": memory.importance,
@@ -71,7 +77,7 @@ def list_memories(
     *,
     memory_type: MemoryType | None = None,
     active: bool | None = None,
-    user_id: str = MVP_USER_ID,
+    user_id: uuid.UUID,
 ) -> list[DigitalTwinMemory]:
     """Every memory matching the filters, most important first.
 
@@ -106,8 +112,15 @@ def list_memories(
 
 
 def get_memory(
-    db: Session, memory_id: uuid.UUID, *, user_id: str = MVP_USER_ID
+    db: Session, memory_id: uuid.UUID, *, user_id: uuid.UUID
 ) -> DigitalTwinMemory:
+    """Return this user's memory, or raise.
+
+    The `user_id` predicate is what makes another user's memory a 404 rather
+    than a 403: refusing tells the caller the memory exists, which is a fact
+    about somebody else's Digital Twin.
+    """
+
     memory = db.execute(
         select(DigitalTwinMemory).where(
             DigitalTwinMemory.id == memory_id,
@@ -126,7 +139,7 @@ def update_memory(
     memory_id: uuid.UUID,
     values: dict[str, object],
     *,
-    user_id: str = MVP_USER_ID,
+    user_id: uuid.UUID,
 ) -> DigitalTwinMemory:
     """Change the fields the caller supplied, and only those."""
 
@@ -143,7 +156,7 @@ def update_memory(
 
 
 def deactivate_memory(
-    db: Session, memory_id: uuid.UUID, *, user_id: str = MVP_USER_ID
+    db: Session, memory_id: uuid.UUID, *, user_id: uuid.UUID
 ) -> DigitalTwinMemory:
     """Retire a memory without destroying it.
 
@@ -154,9 +167,7 @@ def deactivate_memory(
     return update_memory(db, memory_id, {"active": False}, user_id=user_id)
 
 
-def delete_memory(
-    db: Session, memory_id: uuid.UUID, *, user_id: str = MVP_USER_ID
-) -> None:
+def delete_memory(db: Session, memory_id: uuid.UUID, *, user_id: uuid.UUID) -> None:
     """Remove a memory for good. Used when it should never have been stored."""
 
     memory = get_memory(db, memory_id, user_id=user_id)
@@ -165,7 +176,7 @@ def delete_memory(
 
     logger.info(
         "digital_twin_memory_deleted",
-        extra={"user_id": user_id, "memory_id": str(memory_id)},
+        extra={"user_id": str(user_id), "memory_id": str(memory_id)},
     )
 
 
@@ -173,7 +184,7 @@ def active_memories(
     db: Session,
     *,
     limit: int | None = None,
-    user_id: str = MVP_USER_ID,
+    user_id: uuid.UUID,
     now: datetime | None = None,
 ) -> list[DigitalTwinMemory]:
     """The memories that should shape the next answer.

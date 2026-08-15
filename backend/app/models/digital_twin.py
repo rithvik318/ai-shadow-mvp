@@ -8,6 +8,10 @@ would make "add a commitment" a rewrite of the whole profile.
 Neither is evidence. Retrieved document chunks answer questions about what
 SunRadia's documents say; these answer who is asking and what they care about,
 and the prompt keeps that line drawn.
+
+Both belong to a `User`. The company knowledge base does not: documents and
+chunks stay shared, and only the twin is private. That asymmetry is the whole
+multi-user design — one corpus, many people reading it as themselves.
 """
 
 import uuid
@@ -18,6 +22,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -70,15 +75,20 @@ MAX_PROFILE_TEXT = 2000
 class DigitalTwinProfile(Base):
     """Who the Shadow represents.
 
-    One row per owner, enforced by a unique constraint rather than by
-    convention: "the active profile" has to be a fact about the schema, or the
+    One row per user, enforced by a unique constraint rather than by
+    convention: "this user's profile" has to be a fact about the schema, or the
     first bug that writes a second row makes every answer non-deterministic.
     """
 
     __tablename__ = "digital_twin_profile"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -126,7 +136,12 @@ class DigitalTwinMemory(Base):
     __tablename__ = "digital_twin_memory"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
     type: Mapped[MemoryType] = mapped_column(MemoryTypeType, nullable=False, index=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)

@@ -35,6 +35,7 @@ from app.services.features.chat.context_service import build_context
 from app.services.features.digital_twin import memory_service, profile_service
 from app.services.features.digital_twin.persona_service import (
     KNOWLEDGE_HEADING,
+    PersonaContext,
     build_persona_context,
 )
 from app.services.features.retrieval import retrieval_service
@@ -89,15 +90,41 @@ def _compose(persona: str, knowledge: str) -> str:
     return f"{persona}\n\n{KNOWLEDGE_HEADING}\n{knowledge}"
 
 
+def _persona_for(db: Session, twin_user_id: uuid.UUID | None) -> PersonaContext:
+    """This user's profile and memories, or an empty block when there is no
+    user to load them for."""
+
+    if twin_user_id is None:
+        return PersonaContext(text="", memories=[])
+
+    return build_persona_context(
+        profile_service.find_profile(db, user_id=twin_user_id),
+        memory_service.active_memories(db, user_id=twin_user_id),
+        max_chars=settings.PERSONA_CONTEXT_MAX_CHARS,
+    )
+
+
 def answer_question(
     db: Session,
     question: str,
     *,
     user_id: str = MVP_USER_ID,
+    twin_user_id: uuid.UUID | None = None,
     top_k: int | None = None,
     similarity_threshold: float | None | object = UNSET,
 ) -> ChatAnswer:
-    """Answer `question` from the user's indexed documents.
+    """Answer `question` from the shared documents, as `twin_user_id`.
+
+    Two owners, and they are not the same thing. `user_id` owns the corpus and
+    is shared — every person asking reads the same documents. `twin_user_id`
+    owns the Digital Twin, and is one person's alone: their profile, their
+    memories, nobody else's. Keeping them as separate arguments is what stops a
+    future change to one silently widening the other.
+
+    `twin_user_id=None` means no Digital Twin: no profile, no memories, the
+    plain grounded answer this service gave before personas existed. It never
+    means "use whichever profile is lying around" — there is no such profile to
+    find, because every lookup below is scoped to an explicit id.
 
     Returns `NO_CONTEXT_ANSWER` with no sources when retrieval finds nothing,
     rather than raising: an empty knowledge base is a normal state, and the
@@ -129,11 +156,7 @@ def answer_question(
     # Loaded only once retrieval has found something: with nothing to answer
     # from, the reply is fixed and neither the profile nor the memories change
     # it, so reading them would be two queries spent on a constant.
-    persona = build_persona_context(
-        profile_service.find_profile(db, user_id=user_id),
-        memory_service.active_memories(db, user_id=user_id),
-        max_chars=settings.PERSONA_CONTEXT_MAX_CHARS,
-    )
+    persona = _persona_for(db, twin_user_id)
 
     # The persona block is taken *out of* the existing budget rather than added
     # to it, so a Digital Twin cannot grow the prompt past the bound that was
@@ -166,6 +189,7 @@ def answer_question(
         "chat_answered",
         extra={
             "user_id": user_id,
+            "twin_user_id": str(twin_user_id) if twin_user_id else None,
             "retrieved_chunks": len(context.chunks),
             "llm_duration_ms": round(llm_ms, 2),
             "answer_length": len(answer),

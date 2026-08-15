@@ -1,17 +1,22 @@
-"""Reading and writing the single Digital Twin profile.
+"""Reading and writing one user's Digital Twin profile.
 
-One profile per owner, upserted rather than created and updated separately:
-the caller of `PUT /profile` does not know or care whether a row exists yet,
-and making them find out first would be two round trips to express one
-intention.
+One profile per user, upserted rather than created and updated separately: the
+caller of `PUT /profile` does not know or care whether a row exists yet, and
+making them find out first would be two round trips to express one intention.
+
+`user_id` is a required argument on every function here, with no default. That
+is deliberate: a default would be a global profile that a forgotten argument
+could silently reach, and the isolation this module exists to provide would be
+one missing keyword deep. If a caller cannot say whose profile it wants, it
+does not get one.
 """
 
 import logging
+import uuid
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.constants import MVP_USER_ID
 from app.core.exceptions import ProfileIncompleteError, ProfileNotFoundError
 from app.models.digital_twin import DigitalTwinProfile
 
@@ -36,18 +41,16 @@ EDITABLE_FIELDS = (
 )
 
 
-def find_profile(
-    db: Session, *, user_id: str = MVP_USER_ID
-) -> DigitalTwinProfile | None:
-    """Return the owner's profile, or None when none has been set up."""
+def find_profile(db: Session, *, user_id: uuid.UUID) -> DigitalTwinProfile | None:
+    """Return this user's profile, or None when they have not set one up."""
 
     return db.execute(
         select(DigitalTwinProfile).where(DigitalTwinProfile.user_id == user_id)
     ).scalar_one_or_none()
 
 
-def get_profile(db: Session, *, user_id: str = MVP_USER_ID) -> DigitalTwinProfile:
-    """Return the owner's profile, raising if there is none.
+def get_profile(db: Session, *, user_id: uuid.UUID) -> DigitalTwinProfile:
+    """Return this user's profile, raising if they have none.
 
     The API wants a 404 for "no profile yet"; chat wants to carry on without
     one. `find_profile` serves the second case, so neither has to treat the
@@ -63,12 +66,16 @@ def get_profile(db: Session, *, user_id: str = MVP_USER_ID) -> DigitalTwinProfil
 
 
 def upsert_profile(
-    db: Session, values: dict[str, object], *, user_id: str = MVP_USER_ID
+    db: Session, values: dict[str, object], *, user_id: uuid.UUID
 ) -> DigitalTwinProfile:
     """Create the profile, or replace the fields the caller supplied.
 
     Absent keys are left alone rather than blanked, so a caller correcting one
     field does not have to resend the whole profile to keep the rest.
+
+    Writes only to `user_id`'s row. The owner is an argument, never something
+    the supplied values can set — `EDITABLE_FIELDS` does not contain it, so a
+    request body carrying `user_id` cannot redirect the write at somebody else.
     """
 
     profile = find_profile(db, user_id=user_id)
@@ -94,7 +101,7 @@ def upsert_profile(
 
     logger.info(
         "digital_twin_profile_saved",
-        extra={"user_id": user_id, "fields": sorted(supplied)},
+        extra={"user_id": str(user_id), "fields": sorted(supplied)},
     )
 
     return profile

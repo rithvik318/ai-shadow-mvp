@@ -104,4 +104,32 @@ class ProfileIncompleteError(DigitalTwinError):
 
 
 class MemoryNotFoundError(DigitalTwinError):
-    """Raised when a requested memory does not exist for this user."""
+    """Raised when a requested memory does not exist for this user.
+
+    Deliberately the same error whether the memory is absent or belongs to
+    somebody else: telling a caller that a memory exists but is not theirs
+    tells them something about another person's Digital Twin.
+    """
+
+
+# --- Identity ------------------------------------------------------------
+
+
+class IdentityError(AIShadowError):
+    """Base class for failures to establish who a request is for."""
+
+
+class MissingIdentityError(IdentityError):
+    """Raised when a request that needs a Digital Twin carries no identity."""
+
+
+class MalformedIdentityError(IdentityError):
+    """Raised when the identity on a request is not a well-formed user id."""
+
+
+class UserNotFoundError(IdentityError):
+    """Raised when the identity on a request names nobody."""
+
+
+class DuplicateUserError(IdentityError):
+    """Raised when a user is created with an email that already exists."""

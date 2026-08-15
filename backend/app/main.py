@@ -6,6 +6,7 @@ from app.api.document_routes import router as document_router
 from app.api.memory_routes import router as memory_router
 from app.api.profile_routes import router as profile_router
 from app.api.search_routes import router as search_router
+from app.api.user_routes import router as user_router
 from app.config.settings import settings
 from app.core.exceptions import (
     AnalysisValidationError,
@@ -14,15 +15,20 @@ from app.core.exceptions import (
     DocumentNotFoundError,
     DocumentParseError,
     DocumentTooLargeError,
+    DuplicateUserError,
     EmbeddingDimensionError,
     EmbeddingError,
     EmptyDocumentError,
+    IdentityError,
     LLMServiceError,
+    MalformedIdentityError,
     MemoryNotFoundError,
+    MissingIdentityError,
     ProfileIncompleteError,
     ProfileNotFoundError,
     RetrievalError,
     UnsupportedDocumentTypeError,
+    UserNotFoundError,
 )
 from app.prompts import register_default_prompts
 
@@ -98,6 +104,41 @@ async def handle_digital_twin_error(
     )
 
 
+_IDENTITY_ERROR_STATUS: list[tuple[type[IdentityError], int]] = [
+    # 401 rather than 400: the request is well formed, it just does not say who
+    # it is for. That is the status a client can act on once the header becomes
+    # a real session.
+    (MissingIdentityError, 401),
+    (MalformedIdentityError, 422),
+    (UserNotFoundError, 404),
+    (DuplicateUserError, 409),
+]
+
+
+@app.exception_handler(IdentityError)
+async def handle_identity_error(request: Request, exc: IdentityError) -> JSONResponse:
+    """Map identity failures to statuses a caller can tell apart.
+
+    Three ways to fail to name a user need three answers: say who you are, say
+    it in the right shape, or create the user first. One status for all three
+    would leave a caller guessing which.
+    """
+
+    status_code = next(
+        (
+            code
+            for error_type, code in _IDENTITY_ERROR_STATUS
+            if isinstance(exc, error_type)
+        ),
+        400,
+    )
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": str(exc), "error": type(exc).__name__},
+    )
+
+
 @app.exception_handler(RetrievalError)
 async def handle_retrieval_error(request: Request, exc: RetrievalError) -> JSONResponse:
     """Map search-request mistakes to 422.
@@ -138,6 +179,7 @@ async def handle_llm_error(request: Request, exc: LLMServiceError) -> JSONRespon
 app.include_router(document_router)
 app.include_router(search_router)
 app.include_router(chat_router)
+app.include_router(user_router)
 app.include_router(profile_router)
 app.include_router(memory_router)
 

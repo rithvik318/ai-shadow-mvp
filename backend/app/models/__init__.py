@@ -4,6 +4,7 @@ from app.models.digital_twin import (
     MemoryType,
 )
 from app.models.document import Document, DocumentChunk, DocumentStatus
+from app.models.user import User
 
 __all__ = [
     "DigitalTwinMemory",
@@ -12,4 +13,5 @@ __all__ = [
     "DocumentChunk",
     "DocumentStatus",
     "MemoryType",
+    "User",
 ]

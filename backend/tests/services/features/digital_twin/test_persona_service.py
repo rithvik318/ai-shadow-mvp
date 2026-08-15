@@ -16,7 +16,7 @@ WIDE = 100_000
 def _profile(**overrides) -> DigitalTwinProfile:
     values = {
         "id": uuid.uuid4(),
-        "user_id": "mvp-user",
+        "user_id": uuid.uuid4(),
         "name": "Test Executive",
         "role": "CEO",
         "organization": "SunRadia",
@@ -35,7 +35,7 @@ def _profile(**overrides) -> DigitalTwinProfile:
 def _memory(content: str, memory_type: MemoryType = MemoryType.PREFERENCE):
     return DigitalTwinMemory(
         id=uuid.uuid4(),
-        user_id="mvp-user",
+        user_id=uuid.uuid4(),
         type=memory_type,
         content=content,
         importance=3,

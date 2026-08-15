@@ -9,6 +9,12 @@ from app.main import app
 from tests.support.database import db_session  # noqa: F401
 from tests.support.embeddings import embed_query_as, fake_embeddings  # noqa: F401
 from tests.support.llm import fake_llm, registered_prompts  # noqa: F401
+from tests.support.users import (  # noqa: F401
+    test_user,
+    test_user_b,
+    user_b_headers,
+    user_headers,
+)
 
 __all__ = [
     "client",
@@ -17,6 +23,10 @@ __all__ = [
     "fake_embeddings",
     "fake_llm",
     "registered_prompts",
+    "test_user",
+    "test_user_b",
+    "user_b_headers",
+    "user_headers",
 ]
 
 
