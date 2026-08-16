@@ -308,6 +308,118 @@ def test_a_request_with_no_files_is_rejected(client: TestClient) -> None:
     assert client.post(ENDPOINT).status_code == 422
 
 
+# --- the multipart contract ----------------------------------------------
+#
+# Swagger UI renders the request form from the published schema alone, so the
+# schema is worth asserting separately from the behaviour: an endpoint can
+# accept files perfectly well over the wire while describing them as something
+# a client cannot send.
+#
+# **This FastAPI emits OpenAPI 3.1**, where a binary payload is marked with
+# `contentMediaType: application/octet-stream`. It is *not* marked with
+# `format: binary` — that is the OpenAPI 3.0 spelling, which 3.1 dropped when
+# it adopted JSON Schema 2020-12. Verified against the installed FastAPI
+# 0.135.1 / Pydantic 2.12.5, where every valid way of declaring the parameter
+# produces the `contentMediaType` form and none produces `format`.
+#
+# So if these tests ever fail on a `KeyError` for one marker, check which
+# OpenAPI version the app is emitting before touching the endpoint: a downgrade
+# to a 3.0-emitting FastAPI would legitimately publish `format: binary` here.
+
+
+def _batch_body_schema(client: TestClient) -> tuple[dict, dict]:
+    """Return the batch endpoint's request-body media type and resolved schema."""
+
+    schema = client.get("/openapi.json").json()
+    body = schema["paths"]["/documents/batch-upload"]["post"]["requestBody"]
+
+    assert list(body["content"]) == ["multipart/form-data"], (
+        "a file upload must be multipart/form-data"
+    )
+
+    media = body["content"]["multipart/form-data"]
+    resolved = media["schema"]
+
+    if "$ref" in resolved:
+        name = resolved["$ref"].rsplit("/", 1)[-1]
+        resolved = schema["components"]["schemas"][name]
+
+    return media, resolved
+
+
+def test_the_request_body_is_multipart_form_data(client: TestClient) -> None:
+    _batch_body_schema(client)
+
+
+def test_files_are_declared_as_binary_uploads(client: TestClient) -> None:
+    """An array of binary items, not an array of strings.
+
+    The distinction is the whole point: both spell `type: string`, and only
+    the content marker on the *items* says the elements are file payloads
+    rather than text a caller types in.
+    """
+
+    _media, resolved = _batch_body_schema(client)
+    files = resolved["properties"]["files"]
+
+    assert files["type"] == "array"
+    assert files["items"]["type"] == "string"
+    assert files["items"]["contentMediaType"] == "application/octet-stream"
+
+
+def test_the_files_field_is_required(client: TestClient) -> None:
+    _media, resolved = _batch_body_schema(client)
+
+    assert "files" in resolved.get("required", [])
+
+
+def test_the_single_upload_declares_one_binary_file(client: TestClient) -> None:
+    """The endpoint that was already correct, pinned so it stays that way.
+
+    It is also the reference the batch endpoint is measured against: this one
+    is known to render as a file picker, so whatever marker it carries is the
+    marker that works, and both endpoints must carry the same one.
+    """
+
+    schema = client.get("/openapi.json").json()
+    body = schema["paths"]["/documents/upload"]["post"]["requestBody"]
+
+    assert list(body["content"]) == ["multipart/form-data"]
+
+    resolved = body["content"]["multipart/form-data"]["schema"]
+    if "$ref" in resolved:
+        name = resolved["$ref"].rsplit("/", 1)[-1]
+        resolved = schema["components"]["schemas"][name]
+
+    assert resolved["properties"]["file"]["type"] == "string"
+    assert resolved["properties"]["file"]["contentMediaType"] == (
+        "application/octet-stream"
+    )
+
+
+def test_several_files_are_accepted_under_one_field_name(client: TestClient) -> None:
+    """What the schema promises, exercised over the wire: repeating the field
+    is how a multipart client sends more than one file, and it must bind to
+    the list rather than the last value winning."""
+
+    response = client.post(
+        ENDPOINT,
+        files=[
+            _file("a.txt", build_text("One."), TEXT_TYPE),
+            _file("b.txt", build_text("Two."), TEXT_TYPE),
+            _file("c.txt", build_text("Three."), TEXT_TYPE),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 3
+    assert {item["filename"] for item in response.json()["items"]} == {
+        "a.txt",
+        "b.txt",
+        "c.txt",
+    }
+
+
 # --- the single-file endpoint is unchanged -------------------------------
 
 
