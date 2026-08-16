@@ -7,9 +7,24 @@ The authoritative answer to "does X exist today". Where this document and [`ARCH
 ## Implemented
 
 ### Document Upload & Ingestion
-Upload a PDF, DOCX, TXT or Markdown file; it is validated, its text extracted with page and heading provenance, split into overlapping chunks, embedded, and persisted. `POST /documents/upload`. A document reaches `indexed` only once every chunk carries a vector.
+Upload a PDF, DOCX, PPTX, TXT or Markdown file; it is validated, its text extracted with page and heading provenance, split into overlapping chunks, embedded, and persisted. `POST /documents/upload`. A document reaches `indexed` only once every chunk carries a vector. Anything else — `.doc`, `.ppt`, `.vsd`, spreadsheets — is rejected with `415` and leaves no row.
 - **Status:** Implemented
 - **Dependencies:** Embedding Generation, Document Models & Migrations, Configuration Management
+
+### Multi-File Upload
+`POST /documents/batch-upload` takes many files in one request and reports each one separately: filename, `result`, `succeeded`, `document_id`, `status` and a `reason` where there is one. Files are processed independently, so an unreadable or unsupported file does not stop the ones after it — the response carries per-file outcomes rather than one verdict, and is `200` whatever the individual files did. `result` is one of `indexed`, `unchanged`, `replaced`, `failed` or `unsupported`. Reasons name what went wrong and never carry a traceback. Bounded by `MAX_BATCH_UPLOAD_FILES`; a larger batch is `413`, because ingestion is synchronous and holds the request open for the whole batch. Both upload endpoints call one ingestion service — there is no second pipeline.
+- **Status:** Implemented
+- **Dependencies:** Document Upload & Ingestion
+
+### Document Identity & Idempotent Ingestion
+Re-offering a file the knowledge base already holds does not duplicate it. Identity is `content_hash` — the sha256 of the uploaded bytes — optionally qualified by `source_uri`, a stable identifier for where the file came from. Filename is never an identity: two unrelated files are routinely both called `proposal.pdf`, and they stay separate. Same bytes already indexed is `unchanged`: nothing is re-parsed and nothing is re-embedded. Same `source_uri` with different bytes is `replaced`: the document is re-indexed in place, its old chunks deleted and new ones stored, so the previous text stops being retrievable. Without a `source_uri`, edited content is a new document — a plain upload carries nothing tying it to the earlier one. `content_hash` is nullable, and documents ingested before it existed carry `NULL`, which never compares equal to a digest and so is never wrongly deduplicated. `source_uri` and `source_version` are not settable through the API today; they exist for the synchronisation phase to populate.
+- **Status:** Implemented
+- **Dependencies:** Document Upload & Ingestion
+
+### Document Lifecycle
+`pending → processing → indexed | failed | unsupported`. A document is `indexed` only once every chunk carries a vector, so a document retrieval cannot see is never reported as searchable. `failed` records a document this system tried and could not finish — the reason is in `error_message`, and a retry may succeed. `unsupported` is separate because it will not succeed until a parser for that format exists; it is persisted only for ingestion carrying a `source_uri`, so a sync can stop re-offering a file it cannot read, while a hand upload of the same file is still simply rejected. Retrieval requires `indexed`, so `failed` and `unsupported` documents are unreachable from `/search` and `/chat` whatever chunks they may still hold.
+- **Status:** Implemented
+- **Dependencies:** Document Models & Migrations
 
 ### Embedding Generation
 Chunk text is embedded through the configured provider and stored in `document_chunks.embedding`. Requests are batched, vectors are matched to chunks by the provider's index, and a width that disagrees with the column is rejected before storage. The embedding provider can be configured independently of the completion provider.
@@ -51,8 +66,13 @@ A two-step, reproducible workflow for turning a large mixed corpus into the know
 - **Status:** Implemented
 - **Dependencies:** Document Upload & Ingestion
 
+### Multi-User Digital Twin
+Every Digital Twin has an owner. A `users` table holds name, email and role; `POST /users` and `GET /users` create and list them, and the `X-User-ID` request header names which one a call is acting as. Missing is `401`, malformed is `422`, and an id with no user is `404` — the header never creates a user. Profile, memory and the persona half of chat are scoped to that user and every query filters on it. The company knowledge base is deliberately *not* scoped this way: `documents.user_id` and `document_chunks.user_id` remain the shared `MVP_USER_ID`, because the corpus is company-wide and only the twin is private. This is identity, not authentication — the header is trusted as sent.
+- **Status:** Implemented
+- **Dependencies:** Digital Twin Profile & Memory, Database Connectivity Layer
+
 ### Digital Twin Profile & Memory
-Who the Shadow answers for, and what it durably knows about them. One profile per owner — name, role, organization, responsibilities, expertise, priorities, decision preferences, current focus and communication style — through `GET /profile` and `PUT /profile`, where a partial write updates the fields supplied and leaves the rest. Memories are typed (`fact`, `preference`, `decision`, `commitment`, `context`), carry an importance from 1 to 5, and can be retired rather than deleted: `GET /memory`, `POST /memory`, `PATCH /memory/{id}`, `DELETE /memory/{id}`, filterable by type and active flag. Every memory is written explicitly through the API; nothing is extracted from chat or from ingested documents.
+Who the Shadow answers for, and what it durably knows about them. One profile per user — name, role, organization, responsibilities, expertise, priorities, decision preferences, current focus and communication style — through `GET /profile` and `PUT /profile`, where a partial write updates the fields supplied and leaves the rest. Memories are typed (`fact`, `preference`, `decision`, `commitment`, `context`), carry an importance from 1 to 5, and can be retired rather than deleted: `GET /memory`, `POST /memory`, `PATCH /memory/{id}`, `DELETE /memory/{id}`, filterable by type and active flag. Every memory is written explicitly through the API; nothing is extracted from chat or from ingested documents.
 - **Status:** Implemented
 - **Dependencies:** Database Connectivity Layer
 
@@ -122,15 +142,20 @@ Attribution of individual claims to specific passages, by having the model cite 
 - **Status:** Planned
 - **Dependencies:** RAG Chat, Analysis Engine
 
+### OneDrive Synchronization
+Keeping the knowledge base in step with the corpus in OneDrive: discovering what changed, and calling the existing ingestion service with each file's `source_uri` and `source_version`. Nothing of it is built — no Microsoft Graph client, no delta query, no webhooks. The ingestion layer it will call is finished.
+- **Status:** Planned
+- **Dependencies:** Document Identity & Idempotent Ingestion
+
 ### Frontend
 React and Tailwind interface for upload, document management, chat, and source display.
 - **Status:** Planned
 - **Dependencies:** RAG Chat with Citations
 
-### Authentication & Multi-User Support
-User accounts and per-user data isolation. Every table already carries `user_id` and every query already filters on it.
+### Authentication
+Verifying that a caller is who `X-User-ID` says they are. Multi-user data isolation already exists for the Digital Twin, so this is a change to where the identity comes from — a session or token replacing a trusted header — not a migration or a backfill.
 - **Status:** Planned
-- **Dependencies:** Document Models & Migrations
+- **Dependencies:** Multi-User Digital Twin
 
 ### Background Ingestion
 Move ingestion off the request thread once documents are large enough for synchronous processing to be a problem.
@@ -140,5 +165,7 @@ Move ingestion off the request thread once documents are large enough for synchr
 ---
 
 ## Explicitly out of scope for the MVP
+
+Autonomous agents, email, CRM, calendar, LangGraph and n8n are deferred entirely.
 
 Carried over from the reference repository's design but deliberately not built here: the AI Orchestrator, conversation/user/task memory, the tool architecture (email, calendar, research, search), document generation, and multi-agent workflows.

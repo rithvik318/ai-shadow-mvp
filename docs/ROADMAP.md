@@ -6,7 +6,9 @@ The MVP is one sentence: **users upload documents, the documents are indexed, us
 
 ## Current phase
 
-**Phase 4 — RAG chat. Complete.**
+**Phase 6 — Document ingestion and knowledge base foundation. Complete.**
+
+Where things stand right now, in one page: [`PROJECT_STATE.md`](PROJECT_STATE.md).
 
 ---
 
@@ -29,16 +31,23 @@ The MVP is one sentence: **users upload documents, the documents are indexed, us
 - Dialect-aware `cosine_distance`, so the retrieval query is exercised by the SQLite suite and verified against real pgvector by an opt-in test.
 - Stateless RAG chat: `POST /chat` answers from retrieved passages through the registered `rag_answer` prompt, returning the passages the model was shown.
 - Retrieval-only search: `POST /search` returns the ranked passages with their text and no model call, so the similarity floor can be judged against real documents.
+- Multi-file upload, over one ingestion service shared with the single-file path: `POST /documents/batch-upload` processes each file independently and reports a result for each, so one unreadable or unsupported file no longer decides the fate of the batch.
+- Document identity that is not the filename — a content hash, plus an optional source identifier and version. Re-offering an unchanged file is a skip rather than a duplicate, and a changed file from a known source is re-indexed in place with its old chunks removed, so replaced text stops being retrievable.
+- Multi-user Digital Twin: a `users` table, `X-User-ID` as the MVP identity mechanism, and profile, memory and chat scoped to the identified user. The company knowledge base stays shared; only the twin is private.
 - Digital Twin core: a single profile and a typed, explicitly-written memory store, both loaded into every chat above the retrieved passages and clearly separated from them — profile and memory shape tone and priorities, and only documents can be cited.
 - Knowledge-base selection and ingestion: a deterministic manifest chooses which corpus documents belong in the knowledge base and records why for every file, with no per-category limits, and a second script ingests exactly that list through the existing upload endpoint and verifies what landed. Legacy formats the parser cannot read — `.doc`, `.ppt`, `.vsd`, spreadsheets — are reported rather than quietly dropped, and are the largest remaining gap in coverage.
 
 ---
 
-## Next: Phase 5 — Frontend
+## Next: Phase 7 — OneDrive synchronization
 
-React and Tailwind over the API that now exists end to end.
+The ingestion layer it will call is finished: one service, an identity that
+survives a file being edited or renamed, per-file outcomes, and a record of what
+could not be read. What remains is everything specific to OneDrive — a Microsoft
+Graph client, change discovery, and deciding how often to run — none of which is
+built.
 
-Settle first, on real documents: the similarity floor. The 0.0 default excludes only passages pointing the opposite way, which is permissive — it hands the model loosely related context rather than admitting there is none. Too high and the system says "I don't know" about documents it holds. Now that answers are visible, this is the single number most likely to make them feel wrong, and it can finally be judged by reading the output.
+Settle alongside it, on real documents: the similarity floor. The 0.0 default excludes only passages pointing the opposite way, which is permissive — it hands the model loosely related context rather than admitting there is none. Too high and the system says "I don't know" about documents it holds. Now that answers are visible, this is the single number most likely to make them feel wrong, and it can finally be judged by reading the output.
 
 `POST /search` now exists for exactly that purpose — retrieval without the model — so the floor can be moved and the effect read off directly rather than inferred from an answer.
 
@@ -46,12 +55,14 @@ Settle first, on real documents: the similarity floor. The 0.0 default excludes 
 
 ## Then
 
-**Phase 5 detail —** React and Tailwind: upload with progress and indexing status, document list, chat, and a source panel rendering each citation as document and page.
+**Phase 8 — Frontend.** React and Tailwind: upload with progress and indexing status, document list, chat, and a source panel rendering each citation as document and page.
 
-**Phase 6 — Hardening.** Authentication and real per-user scoping, CI, background ingestion, and whatever the first real documents expose about extraction quality.
+**Phase 9 — Hardening.** Authentication behind the `X-User-ID` identity that now exists, CI, background ingestion, and whatever the first real documents expose about extraction quality.
 
 ---
 
 ## Deliberately deferred
 
-The AI Orchestrator, the memory system, and the tool architecture are all designed in the reference repository and none of them are needed for the MVP sentence above. They should not be built until something concretely requires them.
+Autonomous agents, email, CRM, calendar, LangGraph and n8n — deferred entirely, including partial or exploratory versions.
+
+The AI Orchestrator, the conversation/task memory system, and the tool architecture are all designed in the reference repository and none of them are needed for the MVP sentence above. They should not be built until something concretely requires them.

@@ -8,7 +8,7 @@ How work gets done in this repository. Applies equally to human contributors and
 
 ## 1. What this project is
 
-Users upload documents, the documents are indexed, users chat with them, and answers carry citations.
+Users upload documents, the documents are indexed, users chat with them, and answers carry citations. A Digital Twin — one profile and a typed memory store per user — shapes how those answers are written, without ever becoming a citable source.
 
 That is the whole scope. This repository was deliberately started fresh from the `ai-shadow` prototype to keep it that way — see [`docs/DECISIONS.md`](docs/DECISIONS.md). The single most common way to damage it is to build toward the prototype's larger architecture (orchestrator, memory hierarchy, tool layer) instead of toward that sentence.
 
@@ -22,7 +22,7 @@ Before adding anything, ask: does upload → index → chat → citations need t
 Understand → Plan → Discuss → Implement → Test → Review → Document → Commit
 ```
 
-**Understand.** Check `docs/FEATURES.md` before touching a module, and read the surrounding code rather than inferring behaviour from names.
+**Understand.** In a new session, read `docs/PROJECT_STATE.md` first — it is the current checkpoint. Then check `docs/FEATURES.md` before touching a module, and read the surrounding code rather than inferring behaviour from names.
 
 **Plan.** For anything beyond a trivial fix, state the approach and name the files that will change before writing code.
 
@@ -48,7 +48,8 @@ Understand → Plan → Discuss → Implement → Test → Review → Document �
 - **Pure where possible.** Parsing and chunking are functions over data, with no database, network or import-time configuration. Push I/O to the edges.
 - **Domain errors, not HTTP errors.** Services raise from `app/core/exceptions.py`. Only `app/main.py` knows status codes.
 - **No premature abstraction.** Three similar lines beat a speculative abstraction. Do not add a layer for a second caller that does not exist.
-- **No unused code.** Ship it or leave it out. The three components currently carried without a caller are a recorded, time-boxed exception, not a precedent.
+- **No rewrite without a stated reason.** Working code is not improved by being retyped. Reformatting, renaming or restructuring a module that the task did not require is an unreviewable change hiding inside a reviewable one.
+- **No unused code.** Ship it or leave it out. The one component still carried without a caller — the Analysis Engine — is a recorded, time-boxed exception (`docs/KNOWN_ISSUES.md`), not a precedent.
 - **Documentation evolves with code.** A behaviour change is incomplete until its document is updated in the same change.
 
 ---
@@ -114,14 +115,16 @@ Lint and format: `ruff check app tests alembic` and `ruff format app tests alemb
 - **`main` stays green.**
 - **One concern per pull request.** Do not bundle a refactor with a fix.
 - **Never commit `.env`** or any file containing secrets.
+- **Never commit or push unless explicitly asked to.** Leave the work in the tree and say what changed; staging and committing are the owner's call, not a tidy-up step at the end of a task.
 
 ---
 
 ## 9. Security
 
 - Secrets are read only through `app/config/settings.py`, never hardcoded, never logged.
-- **Every stored resource is scoped to its owning user, and every query enforces that scope.** This holds now, with a placeholder owner, and must keep holding as authentication is introduced.
-- There is no authentication yet. Treat that as a known limitation (`docs/KNOWN_ISSUES.md`), not as licence to add unscoped queries.
+- **Two owner concepts, deliberately separate.** The company knowledge base is *shared*: `documents.user_id` and `document_chunks.user_id` hold the string `MVP_USER_ID` for everyone. The Digital Twin is *private*: `digital_twin_profile.user_id` and `digital_twin_memory.user_id` are UUID foreign keys into `users`. Do not merge them and do not widen either scope.
+- **Every Digital Twin query filters on `user_id`.** A read that omits it is one person's Shadow answering with another's memories — a leak, not a missing filter.
+- `X-User-ID` is a development identity header, **not authentication**: it is trusted exactly as sent. Treat the absence of auth as a known limitation (`docs/KNOWN_ISSUES.md`), not as licence to add unscoped queries.
 
 ---
 
@@ -129,6 +132,7 @@ Lint and format: `ruff check app tests alembic` and `ruff format app tests alemb
 
 | Document | Owns |
 |---|---|
+| `docs/PROJECT_STATE.md` | Where the project stands right now — read first |
 | `docs/ARCHITECTURE.md` | System design |
 | `docs/ROADMAP.md` | Phases and what is next |
 | `docs/FEATURES.md` | What exists right now — authoritative |
@@ -137,4 +141,6 @@ Lint and format: `ruff check app tests alembic` and `ruff format app tests alemb
 | `README.md` | Getting started and the API reference |
 | `CLAUDE.md` | How we work |
 
-Exactly one document owns each kind of fact. A change that alters implementation status, uncovers an issue, or makes a non-obvious call updates the matching document in the same change — not as a follow-up.
+Exactly one document owns each kind of fact, and no fact is restated in a second document that does not own it. A change that alters implementation status, uncovers an issue, or makes a non-obvious call updates the matching document in the same change — not as a follow-up.
+
+**Precedence when two documents disagree:** `PROJECT_STATE.md` → `FEATURES.md` → `ARCHITECTURE.md`. The checkpoint beats the catalogue, and the catalogue beats the design.

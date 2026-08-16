@@ -6,10 +6,10 @@ Current gaps, limitations and accepted tradeoffs. For what exists, see [`FEATURE
 
 ## Limitations
 
-### No authentication or multi-user isolation
-There is no auth layer. All ingestion runs as a single placeholder owner, `MVP_USER_ID`.
-- **Impact:** the system is single-tenant and unauthenticated. Do not store production data in it.
-- **Mitigation in place:** every table carries `user_id` and every query filters on it, so adding auth is a change to where that value comes from — not a migration or a backfill.
+### No authentication
+There is no auth layer. A caller states who they are with the `X-User-ID` header and is believed.
+- **Impact:** any caller can act as any user. Do not store production data in it.
+- **Mitigation in place:** the Digital Twin is genuinely user-scoped — `users` exists, profile and memory are UUID-keyed to it, and every query filters on that key — so adding auth is a change to where the identity comes from, not a migration or a backfill. The knowledge base is shared by design and is not affected.
 - **Priority:** High — before real user data.
 
 ### Ingestion is synchronous, and now includes an embedding round trip
@@ -53,10 +53,10 @@ Page boundaries in DOCX are a rendering property, so chunks from a DOCX carry a 
 
 ## Carried-forward decisions to revisit
 
-### Two components have no caller
-The prompt system and Analysis Engine were ported for the chat feature, which is not yet built. The LLM provider abstraction left this list when embeddings started using it.
+### One component has no caller
+The Analysis Engine. The LLM provider abstraction left this list when embeddings started using it, and the prompt system left it when chat started rendering `rag_answer` — though the registered `assistant` prompt is still uncalled. The Analysis Engine remains because chat derives its sources from retrieval rather than from validated model output, so nothing currently needs schema-checked JSON.
 - **Impact:** tested code that nothing exercises end to end.
-- **Priority:** Medium — if chat is not built, remove them rather than leaving them indefinitely.
+- **Priority:** Medium — it earns its place if citations move to sentence level; otherwise remove it rather than leaving it indefinitely.
 
 ### `langchain-text-splitters` carries more weight than it earns
 Used for one function, `RecursiveCharacterTextSplitter`, and pulls a transitive tree considerably larger than that.

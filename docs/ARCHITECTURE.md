@@ -39,6 +39,28 @@ Dependencies point strictly inward. A feature service may use an engine; an engi
 
 ## 3. Ingestion pipeline
 
+Two entry points, one pipeline. `POST /documents/upload` raises, and its errors
+become status codes; `POST /documents/batch-upload` reports the same work as a
+value per file, because a batch cannot use exceptions — the first bad file would
+end the run and the good files after it would never be attempted. Both call
+`ingestion_service`, and the later OneDrive synchronisation will call the same
+function with a `source_uri`. A second caller must not mean a second pipeline.
+
+```
+validate ──▶ identify ──▶ parse ──▶ chunk ──▶ embed ──▶ indexed
+   │             │           │                  │
+   │             │           └── failed         └── failed (chunks kept
+   │             │                                   for the backfill)
+   │             └── unchanged: same bytes already indexed, nothing re-done
+   │             └── replaced: known source, new bytes — old chunks dropped
+   └── rejected before any row exists: empty, oversized, unsupported
+```
+
+Replacement drops the old chunks only *after* the new content has parsed and
+chunked, so a re-index that cannot be read leaves the previous chunks in place
+rather than emptying the document — and the `failed` status keeps them out of
+retrieval either way.
+
 ```
 POST /documents/upload
         │
@@ -108,6 +130,16 @@ updated_at    tstz           │
 `status` moves `pending → processing → indexed | failed`.
 
 Two properties of this schema matter more than the rest. The **embedding column and its index were created up front**, which is why populating them needed no migration — the column is still nullable, and nullable now means "not yet embedded", which is exactly what the backfill looks for. And **every row is user-scoped** from the first migration, so introducing authentication changes where `user_id` comes from rather than requiring a backfill.
+
+Migration `0004` added `content_hash`, `source_uri` and `source_version` to
+`documents`. They are what makes ingestion idempotent: the hash answers "are
+these the same bytes?", and the source answers "is this the same document,
+changed?" — which the hash cannot, since the hash is what changed. `content_hash`
+is nullable and NULL means "identity unknown", which never matches, so documents
+predating the column are never wrongly deduplicated. `source_uri` is unique per
+user where present, via a partial index.
+
+`users`, `digital_twin_profile` and `digital_twin_memory` were added later (migrations `0002` and `0003`). The twin tables carry a UUID `user_id` foreign key into `users`; the document tables keep a plain string `user_id`, and it stays the shared `MVP_USER_ID`. That asymmetry is intentional: **the corpus is company-wide and the twin is personal.** See [`PROJECT_STATE.md`](PROJECT_STATE.md).
 
 ---
 
@@ -202,6 +234,13 @@ model cannot name a document that was not fetched, so a source cannot be
 fabricated. The price is that attribution is per-request rather than
 per-sentence — every retrieved passage is listed, including any the model did
 not use. See [`DECISIONS.md`](DECISIONS.md).
+
+The diagram above is the knowledge half. When the caller carries an `X-User-ID`,
+that user's profile and active memories are rendered into a persona block and
+placed *above* the numbered passages, under `[DIGITAL TWIN PROFILE]` and
+`[MEMORY]`. It shapes tone, emphasis and priorities and is never citable — with
+no profile and no memories the assembled context is byte-for-byte what it was
+before the feature existed.
 
 Stateless. No conversation history is stored or consulted; each question is
 answered from the documents alone.
