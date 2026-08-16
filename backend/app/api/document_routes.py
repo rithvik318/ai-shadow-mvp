@@ -3,9 +3,13 @@ import uuid
 from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
+from app.config.settings import settings
+from app.core.exceptions import BatchTooLargeError
 from app.database.session import get_db
 from app.models.document import DocumentStatus
 from app.schemas.document_schema import (
+    BatchUploadItem,
+    BatchUploadResponse,
     DocumentListResponse,
     DocumentResponse,
     ErrorResponse,
@@ -50,6 +54,68 @@ async def upload_document(
     )
 
     return DocumentResponse.model_validate(document)
+
+
+@router.post(
+    "/batch-upload",
+    response_model=BatchUploadResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Upload and ingest several documents in one request",
+    responses={413: _ERROR_RESPONSES[413]},
+)
+async def batch_upload_documents(
+    files: list[UploadFile] = File(..., description="One or more documents"),
+    db: Session = Depends(get_db),
+) -> BatchUploadResponse:
+    """Ingest many documents, reporting each one independently.
+
+    Every file goes through the same ingestion service the single-file endpoint
+    uses. Each is processed on its own: an unsupported or unreadable file is
+    reported as such and the rest of the batch still lands.
+
+    The response is `200` whatever the individual files did — the batch itself
+    succeeded in processing them. Whether any given file was indexed is in its
+    own entry, not in the status code, because one code cannot describe five
+    different outcomes.
+    """
+
+    if len(files) > settings.MAX_BATCH_UPLOAD_FILES:
+        raise BatchTooLargeError(
+            f"Batch contains {len(files)} files, which exceeds the maximum of "
+            f"{settings.MAX_BATCH_UPLOAD_FILES} per request."
+        )
+
+    items: list[BatchUploadItem] = []
+
+    for upload in files:
+        data = await upload.read()
+
+        outcome = ingestion_service.ingest_file(
+            db,
+            data=data,
+            filename=upload.filename or "",
+            content_type=upload.content_type,
+        )
+
+        items.append(
+            BatchUploadItem(
+                filename=outcome.filename,
+                result=outcome.result,
+                succeeded=outcome.succeeded,
+                document_id=outcome.document_id,
+                status=outcome.status,
+                reason=outcome.reason,
+            )
+        )
+
+    succeeded = sum(1 for item in items if item.succeeded)
+
+    return BatchUploadResponse(
+        items=items,
+        total=len(items),
+        succeeded=succeeded,
+        failed=len(items) - succeeded,
+    )
 
 
 @router.get(

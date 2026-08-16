@@ -14,6 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -23,12 +24,44 @@ from app.database.base import Base
 
 
 class DocumentStatus(StrEnum):
-    """Lifecycle of an uploaded document."""
+    """Lifecycle of an uploaded document.
+
+    `unsupported` is distinct from `failed`: a failed document is one this
+    system tried and could not finish, and retrying it may work. An
+    unsupported one will never succeed until a parser for its format exists,
+    so a sync source that records it can stop offering it. Only ingestion
+    carrying a `source_uri` persists this state — a manual upload of an
+    unsupported file is still rejected outright, leaving no row.
+    """
 
     PENDING = "pending"
     PROCESSING = "processing"
     INDEXED = "indexed"
     FAILED = "failed"
+    UNSUPPORTED = "unsupported"
+
+
+class IngestionResult(StrEnum):
+    """What an ingestion call did, as opposed to the state it left behind.
+
+    Deliberately separate from `DocumentStatus`. A skipped re-upload and a
+    fresh ingest both leave a document `indexed`; only this distinguishes
+    them, and a caller synchronising a corpus needs that difference to report
+    anything meaningful about a run. Kept here beside the status it is so
+    easily confused with, and because schemas may read the models layer but
+    not the service layer.
+    """
+
+    INDEXED = "indexed"
+    UNCHANGED = "unchanged"
+    REPLACED = "replaced"
+    FAILED = "failed"
+    UNSUPPORTED = "unsupported"
+
+
+SUCCESSFUL_INGESTION_RESULTS = frozenset(
+    {IngestionResult.INDEXED, IngestionResult.UNCHANGED, IngestionResult.REPLACED}
+)
 
 
 # SQLAlchemy persists a PEP-435 enum by member *name* unless told otherwise,
@@ -71,6 +104,24 @@ class Document(Base):
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
 
+    # --- source identity -------------------------------------------------
+    #
+    # What makes two uploads "the same document". Filename alone is not an
+    # identity: two unrelated files are routinely both called `proposal.pdf`.
+    #
+    # `content_hash` is the sha256 of the uploaded bytes. It is nullable, and
+    # NULL means "identity unknown" — documents ingested before this column
+    # existed carry NULL, and a NULL never compares equal to a digest, so a
+    # legacy row is never mistaken for a duplicate of a new upload.
+    #
+    # `source_uri` is a stable identifier from wherever the file came from —
+    # a OneDrive item id, later. It is what lets a *changed* file be
+    # recognised as a new version of a document rather than a new document,
+    # which content_hash alone cannot do: the hash is what changed.
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_uri: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    source_version: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
@@ -100,6 +151,19 @@ class Document(Base):
 
     __table_args__ = (
         Index("ix_documents_user_id_created_at", "user_id", "created_at"),
+        # The duplicate lookup on every upload that carries no source.
+        Index("ix_documents_user_id_content_hash", "user_id", "content_hash"),
+        # One document per source, enforced by the database rather than by the
+        # service that happens to be writing. Partial, because NULL means
+        # "no source" and any number of manual uploads share that.
+        Index(
+            "uq_documents_user_id_source_uri",
+            "user_id",
+            "source_uri",
+            unique=True,
+            sqlite_where=text("source_uri IS NOT NULL"),
+            postgresql_where=text("source_uri IS NOT NULL"),
+        ),
     )
 
 

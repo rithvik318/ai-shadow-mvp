@@ -69,6 +69,15 @@ class DocumentNotFoundError(DocumentError):
     """Raised when a requested document does not exist for this user."""
 
 
+class BatchTooLargeError(DocumentError):
+    """Raised when one upload request carries more files than are allowed.
+
+    A limit on the number of files, not their combined size, because the cost
+    that matters here is time: ingestion is synchronous, so the request is held
+    open for as long as the whole batch takes.
+    """
+
+
 # --- Retrieval -----------------------------------------------------------
 
 

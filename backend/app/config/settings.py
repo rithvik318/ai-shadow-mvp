@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     )
 
     MAX_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024
+    # Ingestion is synchronous, so a batch holds a request open for the sum
+    # of its files. This bounds that, and is the number a sync source should
+    # page by.
+    MAX_BATCH_UPLOAD_FILES: int = 25
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 150
 

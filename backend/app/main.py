@@ -10,6 +10,7 @@ from app.api.user_routes import router as user_router
 from app.config.settings import settings
 from app.core.exceptions import (
     AnalysisValidationError,
+    BatchTooLargeError,
     DigitalTwinError,
     DocumentError,
     DocumentNotFoundError,
@@ -48,6 +49,7 @@ register_default_prompts()
 _DOCUMENT_ERROR_STATUS: list[tuple[type[DocumentError], int]] = [
     (DocumentNotFoundError, 404),
     (DocumentTooLargeError, 413),
+    (BatchTooLargeError, 413),
     (UnsupportedDocumentTypeError, 415),
     (EmptyDocumentError, 422),
     (DocumentParseError, 422),

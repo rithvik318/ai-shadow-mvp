@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.document import DocumentStatus
+from app.models.document import DocumentStatus, IngestionResult
 
 
 class DocumentResponse(BaseModel):
@@ -19,6 +19,9 @@ class DocumentResponse(BaseModel):
     chunk_count: int
     status: DocumentStatus
     error_message: str | None
+    content_hash: str | None
+    source_uri: str | None
+    source_version: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -30,6 +33,30 @@ class DocumentListResponse(BaseModel):
     total: int
     limit: int = Field(ge=1, le=200)
     offset: int = Field(ge=0)
+
+
+class BatchUploadItem(BaseModel):
+    """What happened to one file in a batch, independently of the others."""
+
+    filename: str
+    result: IngestionResult
+    succeeded: bool
+    document_id: uuid.UUID | None = None
+    status: DocumentStatus | None = None
+    reason: str | None = None
+
+
+class BatchUploadResponse(BaseModel):
+    """The per-file results of one batch upload.
+
+    The counts are derived from `items` and carried explicitly so a caller can
+    tell a wholly successful batch from a partial one without walking the list.
+    """
+
+    items: list[BatchUploadItem]
+    total: int
+    succeeded: int
+    failed: int
 
 
 class ErrorResponse(BaseModel):
