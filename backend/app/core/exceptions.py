@@ -121,6 +121,51 @@ class MemoryNotFoundError(DigitalTwinError):
     """
 
 
+# --- Synchronisation -----------------------------------------------------
+
+
+class SyncError(AIShadowError):
+    """Base class for failures to synchronise an external source."""
+
+
+class SyncNotConfiguredError(SyncError):
+    """Raised when a sync is requested but no credentials or sources exist.
+
+    Distinct from a failure: nothing is wrong, the deployment simply has not
+    been given anything to synchronise.
+    """
+
+
+class SyncSourceNotFoundError(SyncError):
+    """Raised when a named source is not in the configured set."""
+
+
+class GraphError(SyncError):
+    """Base class for failures talking to Microsoft Graph."""
+
+
+class GraphAuthError(GraphError):
+    """Raised when Graph rejects the application's credentials.
+
+    Separate from a transport failure because the remedy is different: a
+    token that will not mint again is a configuration problem, and retrying
+    it on a schedule only produces the same answer more often.
+    """
+
+
+class GraphRequestError(GraphError):
+    """Raised when a Graph call fails for any other reason."""
+
+
+class DeltaTokenExpiredError(GraphError):
+    """Raised when Graph refuses a delta token and demands a full resync.
+
+    Not really an error — it is Graph telling the caller that too much has
+    changed, or too much time has passed, for an incremental answer to be
+    correct. The caller is expected to start again from a full enumeration.
+    """
+
+
 # --- Identity ------------------------------------------------------------
 
 

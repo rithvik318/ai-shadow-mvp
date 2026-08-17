@@ -1,3 +1,7 @@
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -6,6 +10,7 @@ from app.api.document_routes import router as document_router
 from app.api.memory_routes import router as memory_router
 from app.api.profile_routes import router as profile_router
 from app.api.search_routes import router as search_router
+from app.api.sync_routes import router as sync_router
 from app.api.user_routes import router as user_router
 from app.config.settings import settings
 from app.core.exceptions import (
@@ -20,6 +25,7 @@ from app.core.exceptions import (
     EmbeddingDimensionError,
     EmbeddingError,
     EmptyDocumentError,
+    GraphError,
     IdentityError,
     LLMServiceError,
     MalformedIdentityError,
@@ -28,10 +34,62 @@ from app.core.exceptions import (
     ProfileIncompleteError,
     ProfileNotFoundError,
     RetrievalError,
+    SyncError,
+    SyncNotConfiguredError,
+    SyncSourceNotFoundError,
     UnsupportedDocumentTypeError,
     UserNotFoundError,
 )
 from app.prompts import register_default_prompts
+from app.services.features.sync.scheduler import SyncScheduler
+
+logger = logging.getLogger(__name__)
+
+
+def _run_scheduled_sync() -> None:
+    """One tick of the background sync, with its own database session.
+
+    The request-scoped dependency is not available here — nothing is handling
+    a request — so the session is opened and closed around the work.
+    """
+
+    from app.database.database import SessionLocal
+    from app.services.features.sync import onedrive_sync_service
+
+    db = SessionLocal()
+    try:
+        summaries = onedrive_sync_service.sync_all(db)
+        logger.info(
+            "scheduled_sync_completed",
+            extra={"sources": len(summaries)},
+        )
+    finally:
+        db.close()
+
+
+scheduler = SyncScheduler(
+    _run_scheduled_sync,
+    interval_seconds=max(settings.ONEDRIVE_SYNC_INTERVAL_SECONDS, 1),
+)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Start the periodic sync, if this deployment has asked for one.
+
+    Off unless `ONEDRIVE_SYNC_ENABLED` is set. The test suite constructs
+    `TestClient(app)` without entering it as a context manager, so lifespan
+    does not run there and no test can accidentally start a background job.
+    """
+
+    if settings.ONEDRIVE_SYNC_ENABLED:
+        await scheduler.start()
+
+    try:
+        yield
+    finally:
+        await scheduler.stop()
+
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -40,6 +98,7 @@ app = FastAPI(
         "answered only from their contents."
     ),
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 register_default_prompts()
@@ -178,12 +237,42 @@ async def handle_llm_error(request: Request, exc: LLMServiceError) -> JSONRespon
     )
 
 
+_SYNC_ERROR_STATUS: list[tuple[type[SyncError], int]] = [
+    (SyncSourceNotFoundError, 404),
+    # Not a failure: the deployment has not been given anything to sync. 409
+    # rather than 400 because the request was well-formed and the server is
+    # simply not in a state to satisfy it.
+    (SyncNotConfiguredError, 409),
+    # The far end, not this one. 502 keeps "Graph is down" distinguishable
+    # from "this service is broken" in any dashboard built on status codes.
+    (GraphError, 502),
+]
+
+
+@app.exception_handler(SyncError)
+async def handle_sync_error(request: Request, exc: SyncError) -> JSONResponse:
+    status_code = next(
+        (
+            code
+            for error_type, code in _SYNC_ERROR_STATUS
+            if isinstance(exc, error_type)
+        ),
+        500,
+    )
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": str(exc), "error": type(exc).__name__},
+    )
+
+
 app.include_router(document_router)
 app.include_router(search_router)
 app.include_router(chat_router)
 app.include_router(user_router)
 app.include_router(profile_router)
 app.include_router(memory_router)
+app.include_router(sync_router)
 
 
 @app.get("/", tags=["health"], summary="Service information")
