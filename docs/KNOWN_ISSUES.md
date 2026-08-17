@@ -12,6 +12,28 @@ There is no auth layer. A caller states who they are with the `X-User-ID` header
 - **Mitigation in place:** the Digital Twin is genuinely user-scoped — `users` exists, profile and memory are UUID-keyed to it, and every query filters on that key — so adding auth is a change to where the identity comes from, not a migration or a backfill. The knowledge base is shared by design and is not affected.
 - **Priority:** High — before real user data.
 
+### OneDrive access is tenant-wide, not per-user
+Synchronisation authenticates as the application, not as a person, so its
+Graph permissions are granted once by an administrator and apply to every
+folder they cover.
+- **Impact:** the application can read more of the tenant than the folders in `ONEDRIVE_SOURCES`. Configuration, not permission, is what limits it.
+- **Mitigation in place:** only configured folders are ever enumerated, and the client requests no write scope.
+- **Priority:** Medium — revisit if the knowledge base ever holds material that is not company-wide.
+
+### The scheduled sync assumes a single worker process
+The periodic run is an asyncio task inside the application process. Two
+workers means two timers.
+- **Impact:** with more than one worker, a folder can be synchronised concurrently by each. Ingestion is idempotent, so the corpus stays correct, but the work is duplicated and two runs can race to write the same delta token.
+- **Mitigation in place:** off by default; a single-worker deployment is unaffected.
+- **Priority:** Medium — before running more than one worker with `ONEDRIVE_SYNC_ENABLED` set. A database advisory lock around a source is the smallest fix.
+
+### Synchronisation runs in the request thread
+`POST /sync/onedrive` downloads, parses and embeds before it responds, exactly
+as upload does.
+- **Impact:** a first sync over a large folder holds the request open for as long as the whole folder takes, and any proxy timeout in front of it will fire first.
+- **Mitigation in place:** the work is resumable — re-running continues from the stored delta token — so a timed-out request loses the response, not the progress.
+- **Priority:** Medium, and the same fix as background ingestion.
+
 ### Ingestion is synchronous, and now includes an embedding round trip
 Parsing, chunking, embedding and persistence all happen inside the upload request.
 - **Impact:** upload latency now includes a provider call, so it depends on network conditions and provider load as well as document size. A large document holds a request open for its whole processing time, and there is no progress reporting beyond the final status.

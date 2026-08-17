@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* One focus treatment everywhere, so keyboard users get a consistent
+     affordance rather than the browser default on some controls and a
+     custom ring on others. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent-500 ring-offset-2 ring-offset-white;
+  }
+}

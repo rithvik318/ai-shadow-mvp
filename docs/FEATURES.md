@@ -143,14 +143,30 @@ Attribution of individual claims to specific passages, by having the model cite 
 - **Dependencies:** RAG Chat, Analysis Engine
 
 ### OneDrive Synchronization
-Keeping the knowledge base in step with the corpus in OneDrive: discovering what changed, and calling the existing ingestion service with each file's `source_uri` and `source_version`. Nothing of it is built — no Microsoft Graph client, no delta query, no webhooks. The ingestion layer it will call is finished.
-- **Status:** Planned
-- **Dependencies:** Document Identity & Idempotent Ingestion
+Keeps the knowledge base in step with configured OneDrive folders, over Microsoft Graph. Folders come from `ONEDRIVE_SOURCES` — a JSON array of `{key, path | item_id}` — so adding one is a configuration change; no folder is named in code. Each file is downloaded to a temporary path, passed to the same ingestion service the upload endpoints use, and the staged copy is removed whether ingestion succeeded or not. OneDrive is never mirrored locally.
+
+Identity is the Graph item: `source_uri` is `onedrive:{drive_id}:{item_id}` and `source_version` is the item's cTag, which changes on a content edit but not on a metadata one. So an unchanged file is skipped without being re-parsed or re-embedded, a modified file re-indexes in place and its old chunks stop being retrievable, a renamed or moved file stays one document, and a deleted file takes its document and chunks with it.
+
+The first run is a full enumeration that also establishes a delta token; later runs ask Graph only for what changed. An expired token falls back to a full resynchronisation, which is safe rather than expensive-and-wrong, because unchanged content is skipped. `POST /sync/onedrive` runs one source or all of them and reports per-file results; `GET /sync/onedrive/status` reports stored state without contacting Graph and never returns the delta token. `ONEDRIVE_SYNC_ENABLED` adds a periodic incremental run.
+- **Status:** Implemented
+- **Dependencies:** Document Identity & Idempotent Ingestion, Microsoft Graph Client
+
+### Microsoft Graph Client
+Authentication and transport for OneDrive, isolated from everything that knows what a document is. The OAuth 2.0 client-credentials flow — the application acts as itself, because a background job has nobody present to complete a consent prompt — with the token cached until shortly before it expires. Handles `@odata.nextLink` paging, delta collections, and pre-authorised download URLs, and translates Graph's failures into domain errors: 403 becomes an auth error naming the likely missing consent, and 410 or a `resyncRequired` code becomes a delta-expiry the sync service knows how to recover from. Query strings are stripped from error messages, because that is where Graph puts its tokens.
+- **Status:** Implemented
+- **Dependencies:** Configuration Management
+
+### Scheduled Synchronization
+An asyncio task started from the application lifespan when `ONEDRIVE_SYNC_ENABLED` is set, running an incremental sync every `ONEDRIVE_SYNC_INTERVAL_SECONDS`. Off by default. A failing run is logged and the loop continues, because the usual cause is the far end being briefly unavailable and the sync state is built to make a retry safe. Kept separate from the sync service, so a sync can still be run by hand and tested with no scheduler present.
+- **Status:** Implemented
+- **Dependencies:** OneDrive Synchronization
 
 ### Frontend
-React and Tailwind interface for upload, document management, chat, and source display.
-- **Status:** Planned
-- **Dependencies:** RAG Chat with Citations
+A chat workspace in React, Tailwind and Vite, under `frontend/`. The conversation is the primary surface; documents are attached from the composer rather than from a separate screen, so uploading is part of asking rather than a detour. Multi-file selection goes through `POST /documents/batch-upload`, and each file's outcome is shown distinctly — `indexed`, `unchanged`, `replaced`, `unsupported`, `failed` — because the ingestion layer distinguishes them and collapsing them would hide idempotency working. Retrieved passages render as source cards beneath the answer, separate from it; the persona note says profile and memory shape the wording and are never cited, matching what the backend actually builds `sources` from. A knowledge-base panel lists, filters and deletes documents; a Digital Twin panel reads the selected user's profile and memories. The user selector sends `X-User-ID` and is labelled as identity rather than sign-in.
+
+All API access goes through one client layer whose types mirror `backend/app/schemas/`. Development proxies `/api` to the backend, since no CORS middleware exists; production expects the built files to be served same-origin.
+- **Status:** Implemented
+- **Dependencies:** RAG Chat with Citations, Multi-File Upload, Multi-User Digital Twin
 
 ### Authentication
 Verifying that a caller is who `X-User-ID` says they are. Multi-user data isolation already exists for the Digital Twin, so this is a change to where the identity comes from — a session or token replacing a trusted header — not a migration or a backfill.

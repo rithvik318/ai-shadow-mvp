@@ -106,6 +106,45 @@ A chunk carries the page number and section heading its text came from. This is 
 
 ---
 
+## 3a. OneDrive synchronisation
+
+```
+Microsoft Graph
+   │  client-credentials token, cached
+   ▼
+app/services/graph/          client.py       auth, paging, delta, downloads
+   │                         drive_service.py  payloads → DriveItem
+   ▼
+app/services/features/sync/  source_config.py  ONEDRIVE_SOURCES → sources
+   │                         onedrive_sync_service.py
+   ▼
+ingestion_service.ingest_file(source_uri=…, source_version=…)   §3
+   ▼
+the same documents and chunks every other upload path produces
+```
+
+Nothing below the sync service knows what a document is, and nothing above it
+knows what a bearer token is — the split `app/services/llm/` draws around the
+model provider, for the same reason.
+
+**Identity is the Graph item.** `source_uri` is `onedrive:{drive_id}:{item_id}`
+and `source_version` is the item's cTag. Neither is the filename or the path,
+so a file that is renamed or moved re-indexes in place instead of arriving as
+a second copy of itself. Everything else follows from §4's identity rules.
+
+**The delta token is a promise.** `onedrive_sync_state.delta_link` means
+"everything before this has been dealt with", so it is written only after the
+work it describes is done. A file whose *download* failed was never seen, so
+its run keeps the previous token and reports `partial`; a file that failed to
+*parse* will fail identically forever, so it does not hold the token back.
+That distinction is the difference between a sync that resumes and one that
+either loses files or freezes.
+
+**Deletion is Graph's to declare.** A delta item carrying a `deleted` facet
+removes the document at that `source_uri`, and its chunks go by cascade.
+
+---
+
 ## 4. Data model
 
 ```

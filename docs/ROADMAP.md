@@ -6,7 +6,7 @@ The MVP is one sentence: **users upload documents, the documents are indexed, us
 
 ## Current phase
 
-**Phase 6 — Document ingestion and knowledge base foundation. Complete.**
+**Phase 8 — Frontend. Complete.**
 
 Where things stand right now, in one page: [`PROJECT_STATE.md`](PROJECT_STATE.md).
 
@@ -31,6 +31,8 @@ Where things stand right now, in one page: [`PROJECT_STATE.md`](PROJECT_STATE.md
 - Dialect-aware `cosine_distance`, so the retrieval query is exercised by the SQLite suite and verified against real pgvector by an opt-in test.
 - Stateless RAG chat: `POST /chat` answers from retrieved passages through the registered `rag_answer` prompt, returning the passages the model was shown.
 - Retrieval-only search: `POST /search` returns the ranked passages with their text and no model call, so the similarity floor can be judged against real documents.
+- Frontend: a React and Tailwind chat workspace over the existing API, with document attachment in the composer, per-file upload outcomes, a knowledge-base panel, a Digital Twin panel and citation cards kept distinct from the answer.
+- OneDrive synchronization over Microsoft Graph: configurable source folders, delta-based incremental runs, in-place re-indexing of changed files, removal of deleted ones, per-file result reporting, and an optional periodic run. It calls the same ingestion service the upload endpoints do.
 - Multi-file upload, over one ingestion service shared with the single-file path: `POST /documents/batch-upload` processes each file independently and reports a result for each, so one unreadable or unsupported file no longer decides the fate of the batch.
 - Document identity that is not the filename — a content hash, plus an optional source identifier and version. Re-offering an unchanged file is a skip rather than a duplicate, and a changed file from a known source is re-indexed in place with its old chunks removed, so replaced text stops being retrievable.
 - Multi-user Digital Twin: a `users` table, `X-User-ID` as the MVP identity mechanism, and profile, memory and chat scoped to the identified user. The company knowledge base stays shared; only the twin is private.
@@ -39,15 +41,15 @@ Where things stand right now, in one page: [`PROJECT_STATE.md`](PROJECT_STATE.md
 
 ---
 
-## Next: Phase 7 — OneDrive synchronization
+## Next: Phase 9 — Hardening
 
-The ingestion layer it will call is finished: one service, an identity that
-survives a file being edited or renamed, per-file outcomes, and a record of what
-could not be read. What remains is everything specific to OneDrive — a Microsoft
-Graph client, change discovery, and deciding how often to run — none of which is
-built.
+Authentication behind the `X-User-ID` identity that already exists, CI,
+background ingestion, and CORS or same-origin serving for a deployed frontend.
 
-Settle alongside it, on real documents: the similarity floor. The 0.0 default excludes only passages pointing the opposite way, which is permissive — it hands the model loosely related context rather than admitting there is none. Too high and the system says "I don't know" about documents it holds. Now that answers are visible, this is the single number most likely to make them feel wrong, and it can finally be judged by reading the output.
+Settle first, on real documents: the similarity floor. The whole corpus can now
+arrive automatically and be read through a UI, so this is the number most likely
+to make answers feel wrong. `POST /search` exists to judge it without paying for
+a completion, and is wrapped in the frontend API layer ready to be surfaced. The 0.0 default excludes only passages pointing the opposite way, which is permissive — it hands the model loosely related context rather than admitting there is none. Too high and the system says "I don't know" about documents it holds. Now that answers are visible, this is the single number most likely to make them feel wrong, and it can finally be judged by reading the output.
 
 `POST /search` now exists for exactly that purpose — retrieval without the model — so the floor can be moved and the effect read off directly rather than inferred from an answer.
 
@@ -55,9 +57,7 @@ Settle alongside it, on real documents: the similarity floor. The 0.0 default ex
 
 ## Then
 
-**Phase 8 — Frontend.** React and Tailwind: upload with progress and indexing status, document list, chat, and a source panel rendering each citation as document and page.
-
-**Phase 9 — Hardening.** Authentication behind the `X-User-ID` identity that now exists, CI, background ingestion, and whatever the first real documents expose about extraction quality.
+**Still to surface in the UI —** a retrieval-only search view over `POST /search`, profile and memory editing over `PUT /profile` and the memory writes, and a sync status page over `GET /sync/onedrive/status`. All four endpoints exist and are wrapped in the frontend's API layer; none has a screen yet.
 
 ---
 
