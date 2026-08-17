@@ -290,6 +290,58 @@ Document: capabilities.pdf
 
 The profile and the memories decide tone, emphasis and which options are worth raising. They are never evidence: only the numbered passages can be cited as `[SOURCE n]`, and `sources` in the response is still built from retrieved chunks alone. The persona block is capped by `PERSONA_CONTEXT_MAX_CHARS` and comes *out of* `CHAT_CONTEXT_MAX_CHARS`, so adding a Digital Twin cannot make the prompt bigger than it already was. With no profile and no memories, the context is exactly what it was before the feature existed.
 
+### `POST /sync/onedrive`
+
+Synchronise configured OneDrive folders into the knowledge base. Incremental by
+default; `full` re-enumerates a folder, which is safe to repeat because
+unchanged content is skipped rather than re-indexed.
+
+```bash
+curl -X POST localhost:8000/sync/onedrive \
+     -H 'Content-Type: application/json' \
+     -d '{"source": "capabilities", "full": true}'
+```
+
+```json
+{
+  "sources": [
+    {
+      "source_key": "capabilities",
+      "label": "Capabilities",
+      "mode": "incremental",
+      "status": "succeeded",
+      "discovered": 12, "indexed": 3, "replaced": 1, "unchanged": 7,
+      "deleted": 1, "unsupported": 0, "failed": 0,
+      "duration_seconds": 41.2,
+      "delta_advanced": true,
+      "files": [
+        {"name": "Capability Statement.pdf",
+         "source_uri": "onedrive:b!abc:01XYZ",
+         "result": "indexed",
+         "document_id": "…", "reason": null}
+      ]
+    }
+  ],
+  "total_discovered": 12, "total_indexed": 3, "total_replaced": 1,
+  "total_unchanged": 7, "total_deleted": 1, "total_unsupported": 0,
+  "total_failed": 0, "duration_seconds": 41.2
+}
+```
+
+`result` per file is `indexed`, `unchanged`, `replaced`, `deleted`,
+`unsupported` or `failed`. `409` means nothing is configured; `404` an unknown
+`source`; `502` that Graph refused or could not be reached.
+
+`delta_advanced: false` means a transient failure kept the previous delta
+token, so the next run re-examines the same window rather than skipping past a
+file it never managed to download.
+
+### `GET /sync/onedrive/status`
+
+Stored sync state for every configured source. Contacts nothing. Never returns
+the delta token itself — only `has_delta_token` — because the token is a bearer
+credential for the window it describes.
+
 ### `GET /health`, `GET /`
 
 Liveness probe and service information.
@@ -327,6 +379,59 @@ Set in `backend/.env`; see [`.env.example`](.env.example) for the full list with
 Every setting has a working default, so the application and its tests import without a `.env` present.
 
 ---
+
+## Setting up OneDrive synchronisation
+
+Nothing below is required to run the application; a deployment with no
+credentials serves normally and reports `configured: false`.
+
+**1. Register an application** in Microsoft Entra ID (Azure portal → App
+registrations → New registration). Note the *Application (client) ID* and
+*Directory (tenant) ID*.
+
+**2. Grant application permissions.** Under API permissions, add Microsoft
+Graph → **Application** permissions (not Delegated) → `Files.Read.All`, plus
+`Sites.Read.All` if the folders live in a SharePoint document library. Then
+**Grant admin consent** — without it every Graph call returns `403`, and the
+error this application raises will say so.
+
+**3. Create a client secret** and copy the value immediately; it is shown once.
+
+**4. Find the drive id.** For a person's OneDrive,
+`GET /users/{user-principal-name}/drive`; for a SharePoint library,
+`GET /sites/{site-id}/drives`. Graph Explorer is the easiest way to run these.
+
+**5. Fill in `.env`** — `ONEDRIVE_TENANT_ID`, `ONEDRIVE_CLIENT_ID`,
+`ONEDRIVE_CLIENT_SECRET`, `ONEDRIVE_DRIVE_ID`.
+
+**6. Configure the folders.** `ONEDRIVE_SOURCES` is a JSON array on one line.
+Each entry needs a stable `key` and either a `path` or an `item_id`:
+
+```
+ONEDRIVE_SOURCES=[{"key":"capabilities","path":"Capabilities"},{"key":"case-studies","path":"Capabilities/2024 and Earlier/Case Study"}]
+```
+
+The `key` is what sync state is stored against, so changing one orphans its
+delta token and forces a full resynchronisation. Prefer `item_id` once you know
+it — `GET /sync/onedrive/status` reports the resolved id after the first run —
+because a path stops being correct the moment somebody renames a parent folder.
+
+**7. Run the first synchronisation.** It is a full enumeration: every supported
+file is downloaded, ingested and embedded, so expect it to take a while and to
+cost embedding calls.
+
+```bash
+curl -X POST localhost:8000/sync/onedrive -d '{}' -H 'Content-Type: application/json'
+curl localhost:8000/sync/onedrive/status
+```
+
+Start with one folder to check the credentials and the path before pointing it
+at the whole corpus.
+
+**8. Optionally enable the periodic run** with `ONEDRIVE_SYNC_ENABLED=true` and
+`ONEDRIVE_SYNC_INTERVAL_SECONDS`. It runs incrementally, asking Graph only for
+what changed. Read the single-worker caveat in
+[`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) first.
 
 ## Project structure
 
