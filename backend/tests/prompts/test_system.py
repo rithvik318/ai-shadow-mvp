@@ -6,7 +6,16 @@ from app.prompts.base import PromptTemplate
 from app.prompts.builder import PromptBuilder
 from app.prompts.registry import PromptRegistry
 
-EXPECTED_PROMPT_NAMES = ["assistant", "rag_answer"]
+# Sorted, because `PromptRegistry.list()` sorts.
+EXPECTED_PROMPT_NAMES = [
+    "assistant",
+    "email_compose",
+    "email_subject",
+    "email_thread_summary",
+    "email_transform",
+    "email_triage",
+    "rag_answer",
+]
 
 
 @pytest.mark.parametrize("export_name", system_prompts.__all__)
@@ -86,3 +95,72 @@ def test_assistant_prompt_renders_input() -> None:
 
     assert messages[0]["role"] == "system"
     assert "Help me plan my day." in messages[1]["content"]
+
+
+def test_every_email_prompt_renders_with_its_variables() -> None:
+    """Each template's variables are supplied by exactly one service.
+
+    Rendering puts *both* prompts through `str.format`, so a stray brace in a
+    system prompt — a JSON example, most likely — breaks the template at call
+    time rather than at import. This catches that here instead of in a 502.
+    """
+
+    register_default_prompts()
+
+    cases = {
+        "email_compose": {
+            "persona": "P",
+            "knowledge": "K",
+            "source_email": "S",
+            "recipients": "R",
+            "tone": "T",
+            "instruction": "I",
+        },
+        "email_transform": {
+            "persona": "P",
+            "knowledge": "K",
+            "subject": "S",
+            "body": "B",
+            "instruction": "I",
+        },
+        "email_subject": {"persona": "P", "body": "B", "instruction": "I"},
+        "email_triage": {"persona": "P", "message": "M"},
+        "email_thread_summary": {"persona": "P", "thread": "T"},
+    }
+
+    for name, variables in cases.items():
+        messages = PromptBuilder.build(PromptRegistry.get(name), **variables)
+
+        assert len(messages) == 2, name
+        # The JSON shape survives `.format` — doubled braces became single ones.
+        assert '{"' in messages[0]["content"], name
+
+
+def test_the_writing_prompts_forbid_inventing_company_facts() -> None:
+    """The grounding rule is the feature. If it is softened, the agent starts
+    describing services SunRadia may not offer, in SunRadia's own voice."""
+
+    for prompt in (
+        system_prompts.EMAIL_COMPOSE_PROMPT,
+        system_prompts.EMAIL_TRANSFORM_PROMPT,
+    ):
+        system = prompt.system_prompt.lower()
+
+        assert "never state a fact about the sender's company" in system
+        assert "do not substitute plausible ones" in system
+        assert "never invent a name, a price, a deadline" in system
+
+
+def test_the_compose_prompt_says_it_never_sends() -> None:
+    """A model that believes it can send is one prompt injection away from
+    trying. The refusal is stated in the prompt as well as in the code."""
+
+    assert "never send anything" in (
+        system_prompts.EMAIL_COMPOSE_PROMPT.system_prompt.lower()
+    )
+
+
+def test_the_triage_prompt_refuses_to_invent_a_deadline() -> None:
+    system = system_prompts.EMAIL_TRIAGE_PROMPT.system_prompt.lower()
+
+    assert "never choose a deadline yourself" in system

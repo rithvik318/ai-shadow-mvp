@@ -7,6 +7,9 @@ from fastapi.responses import JSONResponse
 
 from app.api.chat_routes import router as chat_router
 from app.api.document_routes import router as document_router
+from app.api.email_draft_routes import router as email_draft_router
+from app.api.email_routes import router as email_router
+from app.api.email_template_routes import router as email_template_router
 from app.api.memory_routes import router as memory_router
 from app.api.profile_routes import router as profile_router
 from app.api.search_routes import router as search_router
@@ -21,9 +24,21 @@ from app.core.exceptions import (
     DocumentNotFoundError,
     DocumentParseError,
     DocumentTooLargeError,
+    DuplicateEmailTemplateError,
     DuplicateUserError,
+    EmailAttachmentTooLargeError,
+    EmailDraftAlreadySentError,
+    EmailDraftNotApprovedError,
+    EmailDraftNotFoundError,
+    EmailError,
+    EmailProviderAuthError,
+    EmailProviderNotConfiguredError,
+    EmailSendError,
+    EmailTemplateNotFoundError,
+    EmailValidationError,
     EmbeddingDimensionError,
     EmbeddingError,
+    EmptyAttachmentError,
     EmptyDocumentError,
     GraphError,
     IdentityError,
@@ -34,9 +49,11 @@ from app.core.exceptions import (
     ProfileIncompleteError,
     ProfileNotFoundError,
     RetrievalError,
+    SyncAlreadyRunningError,
     SyncError,
     SyncNotConfiguredError,
     SyncSourceNotFoundError,
+    TooManyAttachmentsError,
     UnsupportedDocumentTypeError,
     UserNotFoundError,
 )
@@ -237,8 +254,59 @@ async def handle_llm_error(request: Request, exc: LLMServiceError) -> JSONRespon
     )
 
 
+_EMAIL_ERROR_STATUS: list[tuple[type[EmailError], int]] = [
+    (EmailTemplateNotFoundError, 404),
+    (EmailDraftNotFoundError, 404),
+    # 409 rather than 403: the draft exists and the caller owns it, the server
+    # is simply not in a state where sending it is allowed. The remedy is an
+    # action — approve it — not a permission.
+    (EmailDraftNotApprovedError, 409),
+    (EmailDraftAlreadySentError, 409),
+    (DuplicateEmailTemplateError, 409),
+    # Not a failure: the deployment has no mailbox. Same reasoning as
+    # `SyncNotConfiguredError` — the request was well formed and the server
+    # cannot satisfy it yet.
+    (EmailProviderNotConfiguredError, 409),
+    (TooManyAttachmentsError, 409),
+    (EmailAttachmentTooLargeError, 413),
+    (EmptyAttachmentError, 422),
+    (EmailValidationError, 422),
+    # The far end, not this one — the same 502 a Graph failure gets, so
+    # "the mailbox is down" stays distinguishable from "this service is broken".
+    (EmailProviderAuthError, 502),
+    (EmailSendError, 502),
+]
+
+
+@app.exception_handler(EmailError)
+async def handle_email_error(request: Request, exc: EmailError) -> JSONResponse:
+    """Map email failures to statuses a client can act on.
+
+    Ordered most specific first, because the subclasses overlap: an
+    `EmailAttachmentTooLargeError` is also an `EmailAttachmentError`, and the
+    first match wins.
+    """
+
+    status_code = next(
+        (
+            code
+            for error_type, code in _EMAIL_ERROR_STATUS
+            if isinstance(exc, error_type)
+        ),
+        400,
+    )
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": str(exc), "error": type(exc).__name__},
+    )
+
+
 _SYNC_ERROR_STATUS: list[tuple[type[SyncError], int]] = [
     (SyncSourceNotFoundError, 404),
+    # Already in flight. 409 rather than 429: nothing is rate-limiting the
+    # caller, the resource is simply busy.
+    (SyncAlreadyRunningError, 409),
     # Not a failure: the deployment has not been given anything to sync. 409
     # rather than 400 because the request was well-formed and the server is
     # simply not in a state to satisfy it.
@@ -273,6 +341,9 @@ app.include_router(user_router)
 app.include_router(profile_router)
 app.include_router(memory_router)
 app.include_router(sync_router)
+app.include_router(email_router)
+app.include_router(email_draft_router)
+app.include_router(email_template_router)
 
 
 @app.get("/", tags=["health"], summary="Service information")

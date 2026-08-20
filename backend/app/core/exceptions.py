@@ -140,6 +140,15 @@ class SyncSourceNotFoundError(SyncError):
     """Raised when a named source is not in the configured set."""
 
 
+class SyncAlreadyRunningError(SyncError):
+    """Raised when a source is asked to synchronise while it already is.
+
+    The claim lives in the database rather than in process memory, because the
+    scheduler and a manual API call are two different callers and may not even
+    be the same process.
+    """
+
+
 class GraphError(SyncError):
     """Base class for failures talking to Microsoft Graph."""
 
@@ -187,3 +196,94 @@ class UserNotFoundError(IdentityError):
 
 class DuplicateUserError(IdentityError):
     """Raised when a user is created with an email that already exists."""
+
+
+# --- Email ---------------------------------------------------------------
+
+
+class EmailError(AIShadowError):
+    """Base class for every failure in the email module."""
+
+
+class EmailValidationError(EmailError):
+    """Raised when a draft or request is not well enough formed to act on.
+
+    The caller's to fix, and deliberately not a provider error: "no recipients"
+    and "Outlook is down" must not share a status code, or a client cannot tell
+    whether retrying is worth anything.
+    """
+
+
+class EmailTemplateNotFoundError(EmailError):
+    """Raised when a template does not exist for this user.
+
+    The same error whether the template is absent or belongs to somebody else,
+    for the reason `MemoryNotFoundError` gives: confirming that it exists is a
+    fact about another person's workspace.
+    """
+
+
+class DuplicateEmailTemplateError(EmailError):
+    """Raised when a user already has a template with that name."""
+
+
+class EmailDraftNotFoundError(EmailError):
+    """Raised when a draft does not exist for this user."""
+
+
+class EmailDraftNotApprovedError(EmailError):
+    """Raised when sending is attempted on a draft nobody has approved.
+
+    The whole human-in-the-loop guarantee is this exception. Approval is a
+    separate, explicit act recorded on the row, and editing a draft revokes it
+    — so an approved draft is always the text that was actually read.
+    """
+
+
+class EmailDraftAlreadySentError(EmailError):
+    """Raised when a draft that has already left is asked to leave again."""
+
+
+class EmailAttachmentError(EmailError):
+    """Base class for attachment failures."""
+
+
+class EmailAttachmentTooLargeError(EmailAttachmentError):
+    """Raised when one attachment exceeds the configured size limit."""
+
+
+class TooManyAttachmentsError(EmailAttachmentError):
+    """Raised when a draft would hold more attachments than are allowed."""
+
+
+class EmptyAttachmentError(EmailAttachmentError):
+    """Raised when an attachment carries no bytes.
+
+    Rejected rather than stored: a zero-byte file is almost always a failed
+    read on the client, and discovering that at send time is too late.
+    """
+
+
+class EmailProviderError(EmailError):
+    """Base class for failures talking to a mailbox provider."""
+
+
+class EmailProviderNotConfiguredError(EmailProviderError):
+    """Raised when a mailbox operation is asked for and none is connected.
+
+    Not a failure. Drafting, templates and generation all work without a
+    mailbox; this is the honest answer to "list my inbox" on a deployment that
+    has not been given one, and is what stops the UI inventing messages.
+    """
+
+
+class EmailProviderAuthError(EmailProviderError):
+    """Raised when the provider rejects the application's credentials."""
+
+
+class EmailSendError(EmailProviderError):
+    """Raised when the provider accepted the request and did not send.
+
+    Distinct from every error above because of what it must *not* do: a draft
+    that raises this is recorded as `failed`, never as `sent`.
+    """

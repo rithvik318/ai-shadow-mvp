@@ -111,7 +111,17 @@ def test_the_auth_error_does_not_echo_the_credential() -> None:
     assert "secret" not in str(error.value)
 
 
-def test_missing_configuration_is_named_rather_than_guessed() -> None:
+def test_missing_configuration_is_named_rather_than_guessed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Isolated from the environment on purpose: a configured .env would make
+    # from_settings() correctly succeed, proving nothing about this path.
+    from app.config import settings as settings_module
+
+    monkeypatch.setattr(settings_module.settings, "ONEDRIVE_TENANT_ID", None)
+    monkeypatch.setattr(settings_module.settings, "ONEDRIVE_CLIENT_ID", None)
+    monkeypatch.setattr(settings_module.settings, "ONEDRIVE_CLIENT_SECRET", None)
+
     with pytest.raises(SyncNotConfiguredError) as error:
         GraphClient.from_settings()
 
@@ -296,3 +306,176 @@ def test_a_failed_download_raises() -> None:
 
     with pytest.raises(GraphRequestError):
         _client(transport).download("https://files.example/missing")
+
+
+# --- throttling ----------------------------------------------------------
+#
+# Graph throttles a large corpus aggressively, and a first sync over ~786
+# documents is exactly the traffic that triggers it. A 429 treated as a failed
+# file would hold the delta token back permanently and the corpus would never
+# finish, so these pin the retry behaviour rather than the error message.
+
+
+def _throttle_then(status_after: int, *, retry_after: str | None, times: int = 1):
+    """A transport that throttles `times` times, then answers normally."""
+
+    seen: list[float] = []
+    remaining = {"n": times}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if TOKEN_URL_FRAGMENT in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+
+        seen.append(0.0)
+
+        if remaining["n"] > 0:
+            remaining["n"] -= 1
+            headers = {"Retry-After": retry_after} if retry_after is not None else {}
+            return httpx.Response(
+                429, json={"error": {"code": "activityLimitReached"}}, headers=headers
+            )
+
+        return httpx.Response(status_after, json={"id": "x"})
+
+    return httpx.MockTransport(handler), seen
+
+
+def test_a_throttled_request_is_retried_rather_than_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr("app.services.graph.client.time.sleep", slept.append)
+
+    transport, attempts = _throttle_then(200, retry_after="0.01")
+
+    assert _client(transport).get("/drives/d/root") == {"id": "x"}
+    assert len(attempts) == 2
+
+
+def test_the_retry_after_header_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Graph is telling us its own rate; guessing instead would keep tripping
+    the same limit."""
+
+    slept: list[float] = []
+    monkeypatch.setattr("app.services.graph.client.time.sleep", slept.append)
+
+    transport, _ = _throttle_then(200, retry_after="7")
+    _client(transport).get("/drives/d/root")
+
+    assert slept == [7.0]
+
+
+def test_a_missing_retry_after_falls_back_to_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr("app.services.graph.client.time.sleep", slept.append)
+
+    transport, _ = _throttle_then(200, retry_after=None)
+    _client(transport).get("/drives/d/root")
+
+    assert slept and slept[0] > 0
+
+
+def test_an_absurd_retry_after_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One hostile or mistaken header must not stall a sync run for an hour."""
+
+    slept: list[float] = []
+    monkeypatch.setattr("app.services.graph.client.time.sleep", slept.append)
+
+    transport, _ = _throttle_then(200, retry_after="99999")
+    _client(transport).get("/drives/d/root")
+
+    assert slept == [60.0]
+
+
+def test_persistent_throttling_eventually_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past a point the far end is down, not busy, and the caller should hear
+    about it rather than block forever."""
+
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+
+    transport, attempts = _throttle_then(200, retry_after="0", times=99)
+
+    with pytest.raises(GraphRequestError):
+        _client(transport).get("/drives/d/root")
+
+    assert len(attempts) == 5
+
+
+def test_a_transient_server_error_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if TOKEN_URL_FRAGMENT in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+
+        calls.append(1)
+        return httpx.Response(503 if len(calls) == 1 else 200, json={"id": "x"})
+
+    assert _client(httpx.MockTransport(handler)).get("/drives/d/root") == {"id": "x"}
+    assert len(calls) == 2
+
+
+def test_an_ordinary_error_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 404 is an answer. Repeating it is just slower."""
+
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if TOKEN_URL_FRAGMENT in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+
+        calls.append(1)
+        return httpx.Response(500, json={"error": {"code": "internal"}})
+
+    with pytest.raises(GraphRequestError):
+        _client(httpx.MockTransport(handler)).get("/drives/d/root")
+
+    assert len(calls) == 1
+
+
+def test_downloads_are_throttled_politely_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large corpus is throttled on its downloads as readily as its listings."""
+
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+
+        return httpx.Response(200, content=b"the bytes")
+
+    assert (
+        _client(httpx.MockTransport(handler)).download("https://files.example/x")
+        == b"the bytes"
+    )
+    assert len(calls) == 2
+
+
+def test_a_throttle_log_does_not_carry_the_query_string(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Delta and download tokens live in the query, and a throttle is the one
+    path that deliberately logs the URL."""
+
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+
+    transport, _ = _throttle_then(200, retry_after="0")
+
+    with caplog.at_level("WARNING"):
+        _client(transport).get("/drives/d/items/i?token=super-secret")
+
+    assert "super-secret" not in caplog.text

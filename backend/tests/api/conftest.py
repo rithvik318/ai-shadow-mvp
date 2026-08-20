@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.database.session import get_db
 from app.main import app
 from tests.support.database import db_session  # noqa: F401
+from tests.support.email import fake_analysis  # noqa: F401
 from tests.support.embeddings import embed_query_as, fake_embeddings  # noqa: F401
 from tests.support.llm import fake_llm, registered_prompts  # noqa: F401
 from tests.support.users import (  # noqa: F401
@@ -20,6 +21,7 @@ __all__ = [
     "client",
     "db_session",
     "embed_query_as",
+    "fake_analysis",
     "fake_embeddings",
     "fake_llm",
     "registered_prompts",

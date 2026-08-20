@@ -7,11 +7,16 @@ and neither can be answered by asserting which methods were called.
 """
 
 import os
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import SyncNotConfiguredError, SyncSourceNotFoundError
+from app.core.exceptions import (
+    SyncAlreadyRunningError,
+    SyncNotConfiguredError,
+    SyncSourceNotFoundError,
+)
 from app.models.document import Document, DocumentStatus
 from app.models.sync import SyncStatus
 from app.services.features.documents.document_service import find_document_by_source
@@ -648,3 +653,100 @@ def test_each_source_keeps_its_own_delta_token(
     assert first is not None and second is not None
     assert first.delta_link == "delta:a"
     assert second.delta_link == "delta:b"
+
+
+# --- one run at a time, per source ---------------------------------------
+#
+# The scheduler and a manual API call can both reach `sync_source`. Two runs
+# over one source would download the same files twice and race to write the
+# same delta token — and the loser's token would describe work the winner
+# never did. The claim is made in the database because the two callers may not
+# even be the same process.
+
+
+def test_a_source_already_running_is_refused(db_session: Session) -> None:
+    client = _client([([], "delta:token-1")])
+    sync_source(db_session, client, SOURCE)
+
+    state = get_state(db_session, SOURCE.key)
+    assert state is not None
+    state.status = SyncStatus.RUNNING
+    state.last_attempted_at = datetime.now(UTC)
+    db_session.commit()
+
+    with pytest.raises(SyncAlreadyRunningError):
+        sync_source(db_session, client, SOURCE)
+
+
+def test_a_refused_run_leaves_the_delta_token_alone(db_session: Session) -> None:
+    """The run that is genuinely in flight owns the token. A second caller must
+    not touch it on its way out."""
+
+    client = _client([([], "delta:token-1")])
+    sync_source(db_session, client, SOURCE)
+
+    state = get_state(db_session, SOURCE.key)
+    assert state is not None
+    state.status = SyncStatus.RUNNING
+    state.last_attempted_at = datetime.now(UTC)
+    db_session.commit()
+
+    with pytest.raises(SyncAlreadyRunningError):
+        sync_source(db_session, client, SOURCE)
+
+    db_session.refresh(state)
+    assert state.delta_link == "delta:token-1"
+
+
+def test_a_stale_running_flag_does_not_block_forever(db_session: Session) -> None:
+    """A process killed mid-sync leaves RUNNING behind. Refusing every future
+    sync because of a crash would be worse than the double-run the flag exists
+    to prevent."""
+
+    client = _client([([], "delta:token-1"), ([], "delta:token-2")])
+    sync_source(db_session, client, SOURCE)
+
+    state = get_state(db_session, SOURCE.key)
+    assert state is not None
+    state.status = SyncStatus.RUNNING
+    state.last_attempted_at = datetime.now(UTC) - timedelta(hours=12)
+    db_session.commit()
+
+    summary = sync_source(db_session, client, SOURCE)
+
+    assert summary.status is SyncStatus.SUCCEEDED
+
+
+def test_a_busy_source_does_not_stop_the_others(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Five folders are configured. One of them being mid-run is not a reason
+    for the other four to sit idle."""
+
+    from app.config import settings as settings_module
+
+    monkeypatch.setattr(
+        settings_module.settings,
+        "ONEDRIVE_SOURCES",
+        sources_json(
+            {"key": "one", "path": "One", "drive_id": DRIVE_ID},
+            {"key": "two", "path": "Two", "drive_id": DRIVE_ID},
+        ),
+    )
+
+    client = _client([([], "delta:a"), ([], "delta:b")])
+    sync_all(db_session, client=client)
+
+    busy = get_state(db_session, "one")
+    assert busy is not None
+    busy.status = SyncStatus.RUNNING
+    busy.last_attempted_at = datetime.now(UTC)
+    db_session.commit()
+
+    summaries = sync_all(db_session, client=_client([([], "delta:c")]))
+
+    by_key = {summary.source_key: summary for summary in summaries}
+
+    assert by_key["one"].mode == "skipped"
+    assert by_key["one"].error
+    assert by_key["two"].status is SyncStatus.SUCCEEDED

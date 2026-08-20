@@ -25,7 +25,7 @@ import time
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import select
@@ -36,6 +36,7 @@ from app.core.constants import MVP_USER_ID
 from app.core.exceptions import (
     DeltaTokenExpiredError,
     GraphError,
+    SyncAlreadyRunningError,
     SyncNotConfiguredError,
 )
 from app.models.document import IngestionResult
@@ -134,6 +135,24 @@ def list_states(db: Session) -> list[OneDriveSyncState]:
         .scalars()
         .all()
     )
+
+
+# A run that outlives this is not running: the process that claimed it died
+# without clearing the flag, and refusing every future sync because of a crash
+# would be worse than the double-run the flag exists to prevent.
+_STALE_RUN_AFTER = timedelta(hours=6)
+
+
+def _is_stale(state: OneDriveSyncState) -> bool:
+    if state.last_attempted_at is None:
+        return True
+
+    attempted = state.last_attempted_at
+    if attempted.tzinfo is None:
+        # SQLite hands back naive datetimes; Postgres does not.
+        attempted = attempted.replace(tzinfo=UTC)
+
+    return datetime.now(UTC) - attempted > _STALE_RUN_AFTER
 
 
 def _get_or_create_state(db: Session, source: OneDriveSource) -> OneDriveSyncState:
@@ -327,6 +346,16 @@ def sync_source(
     started = time.perf_counter()
     state = _get_or_create_state(db, source)
 
+    # Two runs over one source would download the same files twice and race to
+    # write the same delta token — and the loser's token would describe work
+    # the winner never did. The scheduler and a manual API call can both land
+    # here, so the claim is made in the database rather than in process memory.
+    if state.status is SyncStatus.RUNNING and not _is_stale(state):
+        raise SyncAlreadyRunningError(
+            f"Source {source.key!r} is already synchronising. Wait for it to "
+            "finish, or retry once it has."
+        )
+
     state.label = source.label
     state.status = SyncStatus.RUNNING
     state.last_attempted_at = datetime.now(UTC)
@@ -457,6 +486,22 @@ def sync_all(
 
     graph = client or GraphClient.from_settings()
 
-    return [
-        sync_source(db, graph, source, full=full, user_id=user_id) for source in sources
-    ]
+    summaries: list[SyncSummary] = []
+
+    for source in sources:
+        try:
+            summaries.append(sync_source(db, graph, source, full=full, user_id=user_id))
+        except SyncAlreadyRunningError as exc:
+            # Reported rather than raised: one busy source must not stop the
+            # other four from synchronising.
+            summaries.append(
+                SyncSummary(
+                    source_key=source.key,
+                    label=source.label,
+                    mode="skipped",
+                    status=SyncStatus.RUNNING,
+                    error=str(exc),
+                )
+            )
+
+    return summaries

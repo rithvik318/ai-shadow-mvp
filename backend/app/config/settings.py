@@ -101,6 +101,41 @@ class Settings(BaseSettings):
     ONEDRIVE_SYNC_ENABLED: bool = False
     ONEDRIVE_SYNC_INTERVAL_SECONDS: int = 3600
 
+    # --- Email Agent -----------------------------------------------------
+    #
+    # Which mailbox provider to use, if any. Unset is the supported state: a
+    # deployment with no mailbox still composes, rewrites, saves drafts and
+    # manages templates — it simply cannot list an inbox or send. That is why
+    # this is None rather than "outlook", and why nothing here has a default
+    # that would make an unconfigured deployment *look* connected.
+    #
+    # "outlook" reuses the Entra application already configured for OneDrive
+    # sync (ONEDRIVE_TENANT_ID / _CLIENT_ID / _CLIENT_SECRET). One application,
+    # one token cache, one client. Note that mail access is a *separate*
+    # consent from files: Mail.Read and Mail.Send have to be granted to that
+    # same application before any mailbox call succeeds.
+    EMAIL_PROVIDER: str | None = None
+
+    # The mailbox to act on, as a UPN or address. Required by the Outlook
+    # provider: application permissions are tenant-wide and carry no user, so
+    # every Graph mail call has to name whose mailbox it means.
+    EMAIL_MAILBOX_ADDRESS: str | None = None
+
+    # Attachments live in the database row (see app/models/email.py), so these
+    # two are what keeps that decision defensible rather than a liability.
+    EMAIL_MAX_ATTACHMENT_BYTES: int = 10 * 1024 * 1024
+    EMAIL_MAX_ATTACHMENTS_PER_DRAFT: int = 10
+
+    # How much retrieved company knowledge may be rendered into a generation
+    # prompt, and how many passages to retrieve. Smaller than the chat budget:
+    # an email is shorter than an answer, and a prompt stuffed with passages
+    # produces a message that reads like a document summary.
+    EMAIL_CONTEXT_MAX_CHARS: int = 6000
+    EMAIL_RETRIEVAL_TOP_K: int = 4
+
+    # How many messages one inbox page asks the provider for.
+    EMAIL_INBOX_PAGE_SIZE: int = 25
+
     LLM_PROVIDER: str = "openrouter"
     LLM_MODEL: str = "openai/gpt-oss-20b"
     OPENAI_API_KEY: str | None = None

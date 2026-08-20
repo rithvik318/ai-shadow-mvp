@@ -9,6 +9,16 @@ from app.models.document import (
     DocumentStatus,
     IngestionResult,
 )
+from app.models.email import (
+    EmailAssessment,
+    EmailAttachment,
+    EmailCategory,
+    EmailDraft,
+    EmailDraftStatus,
+    EmailPriority,
+    EmailTemplate,
+    EmailTemplateCategory,
+)
 from app.models.sync import OneDriveSyncState, SyncStatus
 from app.models.user import User
 
@@ -18,6 +28,14 @@ __all__ = [
     "Document",
     "DocumentChunk",
     "DocumentStatus",
+    "EmailAssessment",
+    "EmailAttachment",
+    "EmailCategory",
+    "EmailDraft",
+    "EmailDraftStatus",
+    "EmailPriority",
+    "EmailTemplate",
+    "EmailTemplateCategory",
     "IngestionResult",
     "MemoryType",
     "OneDriveSyncState",
