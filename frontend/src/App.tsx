@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { ChatPanel } from "./components/chat/ChatPanel";
+import { EmailPanel } from "./components/email/EmailPanel";
 import { KnowledgePanel } from "./components/knowledge/KnowledgePanel";
 import { Sidebar, type Section } from "./components/Sidebar";
 import { TwinsPanel } from "./components/twins/TwinsPanel";
@@ -150,6 +151,8 @@ function Workspace() {
             />
           ) : section === "twins" ? (
             <TwinsPanel />
+          ) : section === "email" ? (
+            <EmailPanel />
           ) : (
             <KnowledgePanel reloadToken={reloadToken} />
           )}

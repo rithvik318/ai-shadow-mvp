@@ -326,6 +326,17 @@ Why the codebase is shaped the way it is. Entries are chronological, oldest firs
 
 ---
 
+## Public OneDrive share links are not a synchronisation transport
+
+- **Date:** 2026-08-18
+- **Decision:** OneDrive synchronisation stays on Microsoft Graph with an Entra application. No public/anonymous shared-link transport is built, and `PublicOneDriveSource` is not added.
+- **Context:** SunRadia supplied "anyone with the link" shared-folder URLs but not Graph credentials, and asked whether the ~786-document corpus could be synchronised from those links directly so ingestion need not wait on a tenant administrator.
+- **Rationale:** Microsoft documents the answer plainly. The Shares API is the supported way to reach a sharing link programmatically, and [its reference](https://learn.microsoft.com/en-us/graph/api/shares-get?view=graph-rest-1.0) states: *"For OneDrive for Business and SharePoint, the Shares API always requires authentication and can't be used to access anonymously shared content without a user context."* The permissions table lists only delegated and application permissions — there is no anonymous tier — and the `Authorization: Bearer {token}` header is marked Required. The browser can open these links because the OneDrive web application redeems the share for a scoped guest token through an internal, undocumented flow; reproducing that means reverse-engineering a private mechanism Microsoft is free to change without notice. That is the brittle scraper the milestone brief explicitly ruled out, and it would sit between us and the entire corpus.
+- **Consequences:** Ingestion of the corpus waits on an Entra app registration with `Files.Read.All` (plus `Sites.Read.All` if the folders live in a SharePoint library) and admin consent. The Graph implementation is already built and tested, so the wait costs time and no engineering. Manual and batch upload remain available for ad-hoc documents in the meantime. The source seam in `onedrive_sync_service` — `resolve_folder`, `iter_delta`, `download` — is the point where any alternative transport would attach if one ever becomes viable; nothing about this decision closes that door.
+- **Status:** Accepted — in effect.
+
+---
+
 ## Template for new decisions
 
 ```markdown

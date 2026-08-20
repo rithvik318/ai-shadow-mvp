@@ -81,6 +81,41 @@ Who the Shadow answers for, and what it durably knows about them. One profile pe
 - **Status:** Implemented
 - **Dependencies:** RAG Chat with Citations, Digital Twin Profile & Memory
 
+### Email Agent
+Drafting, revising, triage and follow-up recommendations, written as the caller's Digital Twin and grounded in the shared knowledge base when asked. Six services under `app/services/features/email/` plus a provider boundary under `app/services/email/provider/`.
+
+**Generation** is one operation-based endpoint, `POST /email/compose`, taking `generate`, `reply`, `rewrite`, `improve`, `shorten`, `expand`, `change_tone`, `professional`, `concise` or `subject`. Each runs a registered prompt through the Analysis Engine and returns validated `{subject, body}` — so a model that answers with prose produces a `502` rather than an email body containing an apology. The Digital Twin of the user named by `X-User-ID` supplies the persona block through the existing `persona_service`; two people asking for the same email from the same corpus get different prompts and nobody else's twin is ever loaded. With `use_knowledge_base`, the existing `retrieval_service` and `context_service` supply `[SOURCE n]` passages; when retrieval finds nothing the prompt says so explicitly and forbids any company claim, `knowledge_used` is `false`, and `sources` is built from retrieval rather than from the model's output.
+
+**Templates** are user-owned, unique per owner, with `{{ placeholder }}` substitution performed textually on the server — no model call, and an unfilled placeholder stays visible rather than becoming a blank. `GET/POST /email/templates`, `GET/PATCH/DELETE /email/templates/{id}`, `POST /email/templates/{id}/fill`.
+
+**Drafts** hold recipients, subject, body, attachments and provider identifiers. `GET/POST /email/drafts`, `GET/PATCH/DELETE /email/drafts/{id}`, `POST /email/drafts/{id}/attachments`, `DELETE /email/drafts/{id}/attachments/{attachment_id}`. Attachment bytes live in the row, bounded by `EMAIL_MAX_ATTACHMENT_BYTES` and `EMAIL_MAX_ATTACHMENTS_PER_DRAFT`; they are never returned in a JSON response.
+
+**Human approval is structural.** `POST /email/drafts/{id}/approve` records `approved_at`; `POST /email/drafts/{id}/send` refuses anything not in `approved` state, whether or not a mailbox is connected. **Any edit to a draft — body, subject, recipients, attaching or detaching a file — withdraws the approval**, so an approved draft is always the text that was approved rather than whatever the row holds at send time. A sent draft is immutable. A provider failure records `failed` with the reason and withdraws approval, so the next attempt is a new decision.
+
+**Triage** classifies one message as `urgent`, `needs_reply`, `fyi`, `follow_up` or `low_priority` with a separate priority, summary, suggested action, action items and a follow-up recommendation, judged against the caller's twin. `POST /email/triage` takes either a `message_id` from the connected mailbox or a `message` the caller supplies — the second is what makes triage usable before any mailbox exists. Assessments are stored keyed by provider and message id and updated in place on re-assessment, because assessing costs a model call. Only the assessment plus subject, sender and timestamp are stored; **message bodies are not**. `POST /email/threads/summarize` summarises a conversation and stores nothing, because a stored summary of a growing thread is wrong as soon as somebody replies.
+
+**Follow-ups** are recommendations. `GET /email/follow-ups` lists them soonest-due first with undated ones last, and `POST /email/follow-ups/{id}/handled` is pressed by a person. A due date appears only where the message itself gave one — the prompt forbids choosing a deadline.
+
+Everything is user-scoped: templates, drafts and assessments are private, and another user's is a `404` rather than a `403`. No request body carries a `user_id`.
+- **Status:** Implemented — **no live mailbox has been connected**
+- **Dependencies:** Multi-User Digital Twin, Persona-Aware RAG, Analysis Engine, Prompt Registry System, Microsoft Graph Client
+
+### Email Provider Abstraction
+`EmailProvider` in `app/services/email/provider/base.py` is a `Protocol` over provider-neutral dataclasses — `EmailMessage`, `EmailAddress`, `AttachmentRef`, `OutgoingEmail`, `SendReceipt`, `ProviderStatus`. Nothing above it contains a vendor's word, and nothing in the package imports a service, a model or a schema. `registry.get_provider()` returns the configured provider or raises; `registry.status()` describes the connection and never raises, so a UI can render a setup notice rather than an error page.
+
+**There is no null provider, no in-memory provider and no demo provider.** A provider that accepted a send without a mailbox would make every "Sent" badge indistinguishable from a real one. With nothing configured, sending is a `409` and the UI disables the button — that is the entire fallback. Adding Gmail is one entry in `_BUILDERS` plus a module beside `outlook_provider.py`.
+- **Status:** Implemented
+- **Dependencies:** Configuration Management
+
+### Outlook Provider (Microsoft Graph)
+`OutlookEmailProvider` translates Graph's JSON into the neutral types and back: `list_messages`, `get_message`, `get_thread`, `get_attachment`, `create_draft` and `send`, over `/users/{mailbox}/…`. It reuses the existing `GraphClient` — the same token cache, throttling retries and error translation OneDrive sync uses — so there is **no second Graph authentication**. `GraphClient` gained one additive method, `post()`, and a `json` argument on its internal `_send`; nothing existing changed behaviour.
+
+A reply goes through `/messages/{id}/reply` rather than `/sendMail`, so it threads correctly. Graph's `sendMail` returns no message id, and `SendReceipt.message_id` is left `None` rather than filled with a guess. A `403` is translated into an auth error that names the likely cause — mail consent is separate from files.
+
+Configured by `EMAIL_PROVIDER=outlook` and `EMAIL_MAILBOX_ADDRESS`, reusing `ONEDRIVE_TENANT_ID`, `ONEDRIVE_CLIENT_ID` and `ONEDRIVE_CLIENT_SECRET`. That application additionally needs the `Mail.Read` and `Mail.Send` application permissions with admin consent.
+- **Status:** Implemented and unit-tested against a mock transport — **never executed against a live tenant**. Nothing in this repository establishes that a real mailbox answers as these tests assume.
+- **Dependencies:** Email Provider Abstraction, Microsoft Graph Client
+
 ### Document Management API
 List documents with status filtering and pagination, retrieve one by id including its failure reason, and delete a document with its chunks. `GET /documents`, `GET /documents/{id}`, `DELETE /documents/{id}`.
 - **Status:** Implemented
@@ -112,20 +147,20 @@ Provider-agnostic chat completions and embeddings across OpenAI and OpenRouter, 
 - **Dependencies:** None
 
 ### Prompt Registry System
-`PromptTemplate`, `PromptRegistry` and `PromptBuilder`, with two built-in prompts: `rag_answer`, used by chat, and `assistant`, which still has no caller.
+`PromptTemplate`, `PromptRegistry` and `PromptBuilder`, with seven built-in prompts: `rag_answer` used by chat; `email_compose`, `email_transform`, `email_subject`, `email_triage` and `email_thread_summary` used by the Email Agent; and `assistant`, which still has no caller.
 - **Status:** Implemented
 - **Dependencies:** None
 
 ### Analysis Engine
 Runs a registered prompt, calls the LLM, tolerates markdown-fenced JSON, and validates the result against a caller-supplied Pydantic model.
-- **Status:** Implemented — **no caller yet**
+- **Status:** Implemented — used by every Email Agent operation
 - **Dependencies:** Prompt Registry System, LLM Provider Abstraction
 
 ### Health & Root Endpoints
 `GET /health`, `GET /`.
 - **Status:** Implemented
 
-> **On the remaining "no caller" entry.** Only the Analysis Engine is left unused. Chat derives its sources from retrieval rather than from validated model output, so nothing currently needs schema-checked JSON — see the RAG Chat decision in `DECISIONS.md`. It earns its place if and when citations move to sentence level; otherwise it should be removed.
+> **The Analysis Engine now has callers.** Every Email Agent operation runs through it: composing and revising return validated `{subject, body}`, and triage returns a validated category, priority and action list. The previously recorded "carried without a caller" exception is closed. Chat still derives its sources from retrieval rather than from validated model output — see the RAG Chat decision in `DECISIONS.md` — so it remains the one path that does not use the engine.
 
 ---
 
@@ -152,7 +187,7 @@ The first run is a full enumeration that also establishes a delta token; later r
 - **Dependencies:** Document Identity & Idempotent Ingestion, Microsoft Graph Client
 
 ### Microsoft Graph Client
-Authentication and transport for OneDrive, isolated from everything that knows what a document is. The OAuth 2.0 client-credentials flow — the application acts as itself, because a background job has nobody present to complete a consent prompt — with the token cached until shortly before it expires. Handles `@odata.nextLink` paging, delta collections, and pre-authorised download URLs, and translates Graph's failures into domain errors: 403 becomes an auth error naming the likely missing consent, and 410 or a `resyncRequired` code becomes a delta-expiry the sync service knows how to recover from. Query strings are stripped from error messages, because that is where Graph puts its tokens.
+Authentication and transport for OneDrive, isolated from everything that knows what a document is. Throttling is treated as part of the protocol rather than as failure: `429`, `503` and `504` are retried, honouring Graph's `Retry-After` where it is given and backing off exponentially where it is not, capped so one bad header cannot stall a run and bounded so a genuinely dead endpoint still surfaces. This matters most on a first synchronisation of a large corpus, which is exactly the traffic shape that provokes throttling — without it a throttled file would be recorded as a transient failure, the delta token would be held back, and the run would never complete. The OAuth 2.0 client-credentials flow — the application acts as itself, because a background job has nobody present to complete a consent prompt — with the token cached until shortly before it expires. Handles `@odata.nextLink` paging, delta collections, and pre-authorised download URLs, and translates Graph's failures into domain errors: 403 becomes an auth error naming the likely missing consent, and 410 or a `resyncRequired` code becomes a delta-expiry the sync service knows how to recover from. Query strings are stripped from error messages, because that is where Graph puts its tokens.
 - **Status:** Implemented
 - **Dependencies:** Configuration Management
 
@@ -182,6 +217,6 @@ Move ingestion off the request thread once documents are large enough for synchr
 
 ## Explicitly out of scope for the MVP
 
-Autonomous agents, email, CRM, calendar, LangGraph and n8n are deferred entirely.
+Autonomous agents, CRM, calendar, LangGraph and n8n are deferred entirely. **Email is no longer deferred** — see the Email Agent above — but everything autonomous about it still is: nothing schedules a send, nothing contacts anybody without a person approving it, and no model can reach a provider.
 
 Carried over from the reference repository's design but deliberately not built here: the AI Orchestrator, conversation/user/task memory, the tool architecture (email, calendar, research, search), document generation, and multi-agent workflows.

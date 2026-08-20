@@ -49,7 +49,7 @@ Understand → Plan → Discuss → Implement → Test → Review → Document �
 - **Domain errors, not HTTP errors.** Services raise from `app/core/exceptions.py`. Only `app/main.py` knows status codes.
 - **No premature abstraction.** Three similar lines beat a speculative abstraction. Do not add a layer for a second caller that does not exist.
 - **No rewrite without a stated reason.** Working code is not improved by being retyped. Reformatting, renaming or restructuring a module that the task did not require is an unreviewable change hiding inside a reviewable one.
-- **No unused code.** Ship it or leave it out. The one component still carried without a caller — the Analysis Engine — is a recorded, time-boxed exception (`docs/KNOWN_ISSUES.md`), not a precedent.
+- **No unused code.** Ship it or leave it out. The Analysis Engine's exception is now closed — the Email Agent calls it. What remains uncalled is the registered `assistant` prompt, recorded in `docs/KNOWN_ISSUES.md`.
 - **Documentation evolves with code.** A behaviour change is incomplete until its document is updated in the same change.
 
 ---
@@ -93,7 +93,15 @@ Lint and format: `ruff check app tests alembic` and `ruff format app tests alemb
 
 **A new error case:** add the exception to `app/core/exceptions.py` under `DocumentError`, add it to `_DOCUMENT_ERROR_STATUS` in `app/main.py`, and cover both the service-level raise and the HTTP status in tests.
 
-**A new prompt:** define it in `app/prompts/system.py`, add it to `register_default_prompts()`, and update `EXPECTED_PROMPT_NAMES` in `tests/prompts/test_system.py`. Never inline a prompt string in a service or route.
+**A new prompt:** define it in `app/prompts/system.py`, add it to `register_default_prompts()`, and update `EXPECTED_PROMPT_NAMES` in `tests/prompts/test_system.py`. Never inline a prompt string in a service or route. Rendering runs `str.format` over *both* the system and user prompts, so any literal brace — a JSON example, most often — must be doubled; `test_every_email_prompt_renders_with_its_variables` catches the ones that are not.
+
+---
+
+## 6a. Adding an email provider
+
+`EmailProvider` in `app/services/email/provider/base.py` is the whole contract. Write a module beside `outlook_provider.py` that satisfies it, add one entry to `_BUILDERS` in `registry.py`, and add the settings it needs to `app/config/settings.py` and `.env.example`. Nothing above the provider boundary changes — that is the claim the boundary exists to make, and a change that requires touching a service means the abstraction leaked.
+
+Two rules are not negotiable. **Nothing in `app/services/email/provider/` may import from `app/models/`, `app/schemas/` or `app/services/features/`** — a provider knows addresses, messages and bytes, not what a draft or a user is. And **no provider may return a `SendReceipt` for a message it did not send**: there is deliberately no null, in-memory or demo provider, because one would make every "Sent" badge in the product indistinguishable from a real one.
 
 ---
 
@@ -122,6 +130,7 @@ Lint and format: `ruff check app tests alembic` and `ruff format app tests alemb
 ## 9. Security
 
 - Secrets are read only through `app/config/settings.py`, never hardcoded, never logged.
+- **The assistant never sends.** An email leaves only after an explicit `POST /email/drafts/{id}/approve` followed by `/send`, and any edit to a draft withdraws that approval. Do not add a code path in which generation, approval or sending happen in one call, and do not give a model or a prompt a route to a provider.
 - **Two owner concepts, deliberately separate.** The company knowledge base is *shared*: `documents.user_id` and `document_chunks.user_id` hold the string `MVP_USER_ID` for everyone. The Digital Twin is *private*: `digital_twin_profile.user_id` and `digital_twin_memory.user_id` are UUID foreign keys into `users`. Do not merge them and do not widen either scope.
 - **Every Digital Twin query filters on `user_id`.** A read that omits it is one person's Shadow answering with another's memories — a leak, not a missing filter.
 - `X-User-ID` is a development identity header, **not authentication**: it is trusted exactly as sent. Treat the absence of auth as a known limitation (`docs/KNOWN_ISSUES.md`), not as licence to add unscoped queries.

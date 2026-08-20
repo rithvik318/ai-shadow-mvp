@@ -5,16 +5,19 @@ project stands, so nothing has to be reconstructed from old conversations. What
 exists, in detail, is [`FEATURES.md`](FEATURES.md); how work gets done here is
 [`../CLAUDE.md`](../CLAUDE.md).
 
-**Checkpoint:** built on `0ff57a3` (`main`). The frontend is in the tree,
-uncommitted; it has never been installed or built. **Updated:** 2026-08-17.
+**Checkpoint:** built on `0ff57a3` (`main`). The frontend and the Email Agent
+are in the tree, uncommitted. The frontend has never been installed or built
+with its real dependencies. **Updated:** 2026-08-19.
 
 ---
 
 ## Current phase
 
 Feature-complete end to end, backend and frontend. Retrieval, RAG chat, the
-multi-user Digital Twin, ingestion, OneDrive synchronization and a React chat
-workspace are all built. The next phase is **hardening**.
+multi-user Digital Twin, ingestion, OneDrive synchronization, a React workspace
+and the **Email Agent** are all built. Two things remain unverified against the
+real world, and both are external rather than structural: no OneDrive folder has
+been synchronised from a live tenant, and no mailbox has been connected.
 
 ## Completed
 
@@ -27,19 +30,27 @@ workspace are all built. The next phase is **hardening**.
 - **Multi-file upload** — `POST /documents/batch-upload`, per-file results, failures isolated to the file that caused them. Both upload paths share one ingestion service.
 - **Idempotent ingestion and re-indexing** — identity is a content hash plus an optional source identifier; unchanged files are skipped, changed ones re-indexed in place with their old chunks removed.
 - **OneDrive synchronization** — Microsoft Graph client-credentials auth, configurable source folders, delta-based incremental runs, deletion handling, per-file results, and an optional periodic run. Calls the existing ingestion service.
-- **Frontend** — `frontend/`, React + Tailwind + Vite. Chat workspace with in-composer multi-file upload, per-file ingestion outcomes, knowledge-base panel, Digital Twin panel, and citation cards kept separate from the answer.
+- **Frontend** — `frontend/`, React + Tailwind + Vite. Chat workspace with in-composer multi-file upload, per-file ingestion outcomes, knowledge-base panel, Digital Twin panel, Email Agent workspace, and citation cards kept separate from the answer.
+- **Email Agent** — drafting, ten revision operations, user-owned templates with placeholder filling, drafts with attachments, triage, follow-up recommendations, and a provider boundary with an Outlook implementation over the existing Graph client. Migration `0006`. Human approval is required before any send, and editing a draft withdraws it.
 
 ## Test status
 
-**Backend: 637 expected** (632 at `0ff57a3` plus the 5 sync regression tests).
-Not re-run since; run `pytest -q` from `backend/`.
+**Backend: 650 at the last local run** (637 plus 13 openapi/graph tests), and
+the Email Agent adds **roughly 150 more**, not yet executed — this box has no
+package registry, so `pytest` could not be run here. Run `pytest -q` from
+`backend/`. What *was* run: `ruff check`, `ruff format --check`, `py_compile`,
+and `python -m scripts.static_check`, which resolves every first-party import
+and checks every first-party call site against its signature.
 
-**Frontend: 37 passing**, actually executed — `node --import tsx --test` over
+**Frontend: 123 passing**, actually executed — `node --import tsx --test` over
 `src/tests/`, covering the API client (endpoint paths, `X-User-ID`
 propagation, error translation) and the upload result mapping. They need no
 browser and no bundler. The React components have **never been built or
-typechecked** against real `@types/react`: the environment they were written in
-had no package registry. Run `npm install && npm run typecheck && npm run
+typechecked against real `@types/react`**: the environment they were written in
+had no package registry. They *were* typechecked against a hand-written minimal
+`@types/react` shim, which is clean across the whole tree and which caught two
+real defects in the email components. That is a checking aid, not a substitute.
+Run `npm install && npm run lint && npm run typecheck && npm run test && npm run
 build` in `frontend/` before treating the UI as working.
 
 ## Architecture boundaries
@@ -63,6 +74,10 @@ build` in `frontend/` before treating the UI as working.
   call `ingestion_service`. Adding a caller must not add a pipeline.
 - **Graph stays in `app/services/graph/`.** Nothing below the sync service knows
   what a document is; nothing above it knows what a bearer token is.
+- **One sync per source at a time.** The claim is written to
+  `onedrive_sync_state.status`, not held in process memory, because the
+  scheduler and a manual API call may not be the same process. A run older
+  than six hours is treated as stale so a crash cannot block syncing forever.
 - **The delta token is only advanced when it is safe.** A transient failure —
   a download that never completed — keeps the previous token and reports
   `partial`, so the next run re-examines that window. A parse failure does not,
@@ -73,6 +88,28 @@ build` in `frontend/` before treating the UI as working.
   not have.
 - **The user selector is identity, not sign-in**, and the UI says so where a
   person can read it.
+- **The Email Agent never sends on its own account.** A draft leaves only if a
+  person called `POST /email/drafts/{id}/approve` and then `/send`, and **any
+  edit to a draft withdraws the approval**. No prompt, no service and no route
+  gives a model a path to a provider.
+- **There is no simulated mailbox.** No null provider, no in-memory provider, no
+  demo inbox. With nothing configured, sending is `409` and the inbox is `409` —
+  "no mail" and "no mailbox" are shown as the different facts they are, and a
+  draft reading `sent` always means a provider confirmed it.
+- **The Email Agent does not know what Graph is.** Everything above
+  `app/services/email/provider/base.py` speaks in provider-neutral dataclasses;
+  the Outlook module is the only file that names Microsoft, and it reuses the
+  existing `GraphClient` rather than authenticating again.
+- **Email timestamps are aware on every dialect.** The email tables use
+  `UtcDateTime` (`app/database/types.py`), a `TypeDecorator` that converts to
+  UTC on write and labels UTC on read. `DateTime(timezone=True)` alone is a
+  no-op on SQLite, which returns naive values — so "is this follow-up overdue?"
+  raised `TypeError` under test and not in production, and an offset-bearing
+  value could be stored with its clock reading rather than its instant. Only
+  the email tables use it; retrofitting the others is a separate change.
+- **A mailbox is not mirrored.** There is no message table. Only what triage
+  *concluded* is stored, keyed by the provider's own message id, plus the
+  subject, sender and timestamp needed to recognise a row. Bodies are not kept.
 - **Only `indexed` documents are retrievable.** `failed` and `unsupported`
   documents are unreachable from `/search` and `/chat` whatever chunks they
   still hold, so a partial ingest never answers a question.
@@ -80,16 +117,23 @@ build` in `frontend/` before treating the UI as working.
 ## Current task
 
 None in progress. The frontend awaits its first `npm install` and build. No real
-OneDrive tenant has been configured — `ONEDRIVE_SOURCES` is empty, and the five
-SunRadia folders are not yet pointed at anything.
+OneDrive tenant has been synchronised — `ONEDRIVE_SOURCES` is empty, and the
+five SunRadia folders are not yet pointed at anything. No mailbox is connected:
+`EMAIL_PROVIDER` is unset, and the `Mail.Read` / `Mail.Send` consents have not
+been granted to the Entra application.
 
 ## Next planned components
 
-1. **Hardening** — authentication behind `X-User-ID`, CI, background ingestion,
+1. **Run the suites.** `pytest -q` in `backend/`, and `npm install` then lint,
+   typecheck, test and build in `frontend/`. Nothing else should be built until
+   both are green.
+2. **Connect the mailbox.** Grant `Mail.Read` and `Mail.Send` to the existing
+   Entra application, set `EMAIL_PROVIDER=outlook` and `EMAIL_MAILBOX_ADDRESS`,
+   and check `GET /email/provider/status`. That endpoint reports exactly what is
+   missing, and nothing in the Email Agent needs to change when it goes green.
+3. **First real OneDrive sync**, still outstanding from the previous milestone.
+4. **Hardening** — authentication behind `X-User-ID`, CI, background ingestion,
    and CORS or same-origin serving for the deployed frontend.
-2. **Surfacing what exists** — `POST /search`, profile and memory editing, and
-   a OneDrive sync status page. All wrapped in the frontend API layer, none
-   given a screen.
 
 ## Known limitations
 
@@ -102,6 +146,9 @@ SunRadia folders are not yet pointed at anything.
 - Graph permissions are tenant-wide, the scheduled run assumes one worker process, and a sync holds its request open for the whole folder. All three are in `KNOWN_ISSUES.md`.
 - The backend registers no CORS middleware, so the frontend is same-origin only: proxied in development, and expected to be served alongside the API in production.
 - Chat history is not persisted anywhere, and the frontend has no profile or memory editing UI.
+- No mailbox has ever been connected. Every Outlook behaviour is verified against a mock transport only; a live tenant may differ, and nothing in this repository proves otherwise.
+- Email attachment bytes are stored in the database row. Bounded by configuration and deliberate for this scale; a blob store is the answer when it stops being.
+- Triage runs one message at a time, on request, because each assessment is a model call. There is no bulk triage and no background pass.
 - The retrieval similarity floor still defaults to `0.0` and has not been tuned against real documents.
 - No CI, no type checking in CI, no structured logging, no upload rate limiting.
 
@@ -109,7 +156,9 @@ Detail and priority live in [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
 
 ## Explicitly deferred
 
-Autonomous agents, email, CRM, calendar, LangGraph and n8n — none of them, in any
-partial form. Also deferred, from the reference repository's design: the AI
+Autonomous agents, CRM, calendar, LangGraph and n8n — none of them, in any
+partial form. Email is now built, but everything autonomous about it is still
+deferred: nothing schedules a send, nothing contacts anybody without a person
+approving it, and no model can reach a mailbox provider. Also deferred, from the reference repository's design: the AI
 Orchestrator, the tool architecture and multi-agent workflows. Nothing here is
 built until something concretely requires it.

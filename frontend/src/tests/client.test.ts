@@ -233,6 +233,15 @@ describe("the client calls nothing the backend does not serve", () => {
       "/memory",
       "/sync/onedrive",
       "/sync/onedrive/status",
+      "/email/provider/status",
+      "/email/compose",
+      "/email/messages",
+      "/email/triage",
+      "/email/threads/summarize",
+      "/email/assessments",
+      "/email/follow-ups",
+      "/email/drafts",
+      "/email/templates",
     ];
 
     for (const path of served) {
@@ -244,5 +253,68 @@ describe("the client calls nothing the backend does not serve", () => {
     // memories.
     assert.equal(typeof (api as Record<string, unknown>).getPreferences, "undefined");
     assert.equal(typeof (api as Record<string, unknown>).savePreferences, "undefined");
+  });
+});
+
+describe("the email client", () => {
+  it("sends X-User-ID on every user-scoped email call", async () => {
+    // Templates, drafts and assessments are private to the twin acting, the
+    // same way profile and memory are. A call that forgot the header would be
+    // a 401 in front of a user.
+    stubFetch({ body: { items: [], total: 0 } });
+
+    await api.listEmailTemplates("u1");
+    await api.listEmailDrafts("u1");
+    await api.listEmailFollowUps("u1");
+    await api.listEmailAssessments("u1");
+
+    assert.equal(calls.length, 4);
+    for (const call of calls) {
+      assert.equal(call.headers.get("X-User-ID"), "u1");
+    }
+  });
+
+  it("sends no identity for the provider status", async () => {
+    // A setup notice has to render before anybody has chosen a twin.
+    stubFetch({ body: { provider: null, configured: false, connected: false } });
+
+    await api.getEmailProviderStatus();
+
+    assert.equal(calls[0].url, "/api/email/provider/status");
+    assert.equal(calls[0].headers.get("X-User-ID"), null);
+  });
+
+  it("always confirms explicitly when sending", async () => {
+    // The backend requires `confirm: true` as a second gate on an
+    // irreversible action, and the client must not be able to omit it.
+    stubFetch({ body: {} });
+
+    await api.sendEmailDraft("u1", "d1");
+
+    assert.equal(calls[0].url, "/api/email/drafts/d1/send");
+    assert.deepEqual(JSON.parse(String(calls[0].body)), { confirm: true });
+  });
+
+  it("approves and sends through two separate calls", async () => {
+    // One endpoint that approved-and-sent would collapse the review step into
+    // the action it exists to gate.
+    stubFetch({ body: {} });
+
+    await api.approveEmailDraft("u1", "d1");
+    await api.sendEmailDraft("u1", "d1");
+
+    assert.deepEqual(
+      calls.map((call) => call.url),
+      ["/api/email/drafts/d1/approve", "/api/email/drafts/d1/send"],
+    );
+  });
+
+  it("asks the backend to fill a template rather than doing it locally", async () => {
+    stubFetch({ body: { subject: "", body: "", missing: [] } });
+
+    await api.fillEmailTemplate("u1", "t1", { name: "Ana" });
+
+    assert.equal(calls[0].url, "/api/email/templates/t1/fill");
+    assert.deepEqual(JSON.parse(String(calls[0].body)), { values: { name: "Ana" } });
   });
 });

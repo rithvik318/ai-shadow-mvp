@@ -342,6 +342,177 @@ Stored sync state for every configured source. Contacts nothing. Never returns
 the delta token itself — only `has_delta_token` — because the token is a bearer
 credential for the window it describes.
 
+### Email Agent
+
+The Email Agent drafts as your Digital Twin, grounded in the shared knowledge
+base when you ask for it. **It never sends anything on its own account.** A
+draft leaves only after you approve it and then send it, and any edit withdraws
+the approval — so what goes out is always the text you read.
+
+Composing, revising, templates, drafts and triage of a message you supply all
+work with **no mailbox connected**. Listing an inbox and sending do not. There
+is no simulated mailbox anywhere in this system, so a draft showing `sent`
+always means a real provider confirmed it.
+
+All of these except `GET /email/provider/status` require `X-User-ID`. Templates,
+drafts and assessments are private to that user; another user's is a `404`.
+
+#### `GET /email/provider/status`
+
+Whether a mailbox is connected. Never fails.
+
+```json
+{
+  "provider": null,
+  "configured": false,
+  "connected": false,
+  "mailbox": null,
+  "detail": "No mailbox is connected. Drafting, rewriting, templates and saved drafts all work without one; listing an inbox and sending do not. Set EMAIL_PROVIDER and EMAIL_MAILBOX_ADDRESS on the server to connect one.",
+  "capabilities": []
+}
+```
+
+`configured` and `connected` are separate on purpose: nothing set up is a setup
+step, and set-up-but-refused is a credentials or consent problem. They need
+different fixes.
+
+#### `POST /email/compose`
+
+One endpoint for every generation and revision operation.
+
+```bash
+curl -X POST http://localhost:8000/email/compose \
+  -H "X-User-ID: 7c9e6679-7425-40de-944b-e07fc1f90ae7" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "operation": "generate",
+        "instruction": "Draft a proposal follow-up mentioning our analytics capabilities.",
+        "recipients": ["ana@client.com"],
+        "use_knowledge_base": true
+      }'
+```
+
+```json
+{
+  "subject": "Following up on the analytics proposal",
+  "body": "Ana,\n\nThank you for the time yesterday...",
+  "operation": "generate",
+  "sources": [
+    {
+      "document": "SunRadia Capabilities 2024.pdf",
+      "section": "Analytics",
+      "page": 3,
+      "similarity": 0.81,
+      "document_id": "…",
+      "chunk_id": "…"
+    }
+  ],
+  "knowledge_used": true,
+  "persona_used": true
+}
+```
+
+`operation` is one of `generate`, `reply`, `rewrite`, `improve`, `shorten`,
+`expand`, `change_tone`, `professional`, `concise` or `subject`. Revisions take
+the current `subject` and `body`; `reply` takes `source_subject`, `source_body`
+and `source_sender`; `change_tone` takes `tone`.
+
+`persona_used` is false when that user has no Digital Twin profile yet.
+`knowledge_used` is false when `use_knowledge_base` was off **or when retrieval
+found nothing** — and in that second case the model is explicitly told that no
+company knowledge was retrieved and instructed to make no claim about SunRadia.
+`sources` is built from retrieval, never from the model's output, so a source
+cannot be fabricated.
+
+**Nothing is saved and nothing is sent.** Turning this into a draft is a
+separate call.
+
+#### `GET/POST /email/templates`, `GET/PATCH/DELETE /email/templates/{id}`
+
+User-owned templates. Placeholders are written `{{ name }}`, and the response
+lists them under `placeholders`, derived from the text rather than stored.
+Names are unique per owner — two people may both have a "Follow-up".
+
+#### `POST /email/templates/{id}/fill`
+
+Substitutes values and returns the result. **No model call**: this is textual
+substitution. A placeholder you leave out stays visible as `{{ name }}` in the
+output and is listed in `missing`, so you can see what you still owe rather
+than finding a blank where a client's name should be.
+
+#### `GET/POST /email/drafts`, `GET/PATCH/DELETE /email/drafts/{id}`
+
+Drafts hold recipients, subject, body, attachments and provider identifiers.
+Recipients are optional here and required at approval — a generated draft often
+has none yet.
+
+**`PATCH` withdraws approval**, always, whatever changed. A sent draft cannot be
+edited at all; it can be deleted, which forgets this system's record and unsends
+nothing.
+
+#### `POST /email/drafts/{id}/attachments`, `DELETE …/{attachment_id}`
+
+Multipart upload of one file. Any type — an attachment is whatever you mean to
+send. Bounded by `EMAIL_MAX_ATTACHMENT_BYTES` and
+`EMAIL_MAX_ATTACHMENTS_PER_DRAFT`. Attaching or detaching also withdraws
+approval. Attachment bytes are never returned in a JSON response.
+
+#### `POST /email/drafts/{id}/approve`
+
+Records that you read this draft and want it sent. **It does not send.**
+Requires recipients, a subject and a body.
+
+#### `POST /email/drafts/{id}/send`
+
+```bash
+curl -X POST http://localhost:8000/email/drafts/$DRAFT_ID/send \
+  -H "X-User-ID: $USER_ID" -H "Content-Type: application/json" \
+  -d '{"confirm": true}'
+```
+
+Sends an already-approved draft. `409` when the draft is not approved, when it
+has already been sent, or when no mailbox is connected. `502` when the provider
+refused — the draft becomes `failed` with the reason in `send_error`, and its
+approval is withdrawn, because the next attempt is a new decision.
+
+#### `GET /email/messages`, `GET /email/messages/{id}`
+
+Real messages from the connected mailbox, each with your assessment of it if it
+has one. `409` when no mailbox is connected, rather than an empty list: "no
+mail" and "no mailbox" are different facts.
+
+#### `POST /email/triage`
+
+Classifies one message as `urgent`, `needs_reply`, `fyi`, `follow_up` or
+`low_priority`, with a separate priority, a summary, a suggested action, action
+items and a follow-up recommendation — judged against your Digital Twin, so
+what counts as urgent follows your responsibilities.
+
+Send either `message_id`, to assess a message from the mailbox, or `message`, to
+assess one you supply. The second is what makes triage usable before Outlook is
+connected. `persist: false` assesses without storing, for a message that is in
+no mailbox.
+
+A `follow_up_due_at` appears only when the message itself gave a date. The
+prompt forbids choosing one.
+
+#### `POST /email/threads/summarize`
+
+What was decided, what is open and who owes what. Takes `thread_id` or
+`messages`. Not stored — a thread grows, and a saved summary of one is wrong as
+soon as somebody replies.
+
+#### `GET /email/assessments`, `GET /email/follow-ups`
+
+Stored triage results, and the subset recommending a follow-up. Both read the
+database only, so they work while the mailbox is unreachable. Follow-ups are
+soonest-due first with undated ones last.
+
+#### `POST /email/follow-ups/{id}/handled`
+
+Marks a follow-up dealt with, or puts it back. Always yours to press — nothing
+marks itself handled.
+
 ### `GET /health`, `GET /`
 
 Liveness probe and service information.
@@ -445,11 +616,16 @@ backend/app/
 ├── prompts/        prompt templates, registry, builder
 ├── schemas/        Pydantic request/response models
 └── services/
+    ├── email/      mailbox provider boundary
+    │   └── provider/   EmailProvider protocol, Outlook, registry
     ├── engines/    reusable, domain-agnostic AI capabilities
-    ├── features/   product features (documents/, retrieval/)
+    ├── features/   product features (documents/, retrieval/, chat/,
+    │               digital_twin/, sync/, users/, email/)
+    ├── graph/      Microsoft Graph client and drive service
     └── llm/        provider abstraction and embeddings
 
-backend/scripts/    operational entrypoints (verification, backfill)
+backend/scripts/    operational entrypoints (verification, backfill,
+                    source discovery, offline static checks)
 ```
 
 ---
@@ -457,6 +633,13 @@ backend/scripts/    operational entrypoints (verification, backfill)
 ## Security
 
 There is no authentication yet, and all data belongs to a single placeholder owner (`MVP_USER_ID`). Every table carries a `user_id` column and every query filters on it from the first migration, so introducing real authentication is a change to where that value comes from rather than a schema migration and a backfill.
+
+The Email Agent adds one rule to that: **it cannot send an email by itself.**
+Generation produces text, saving produces a draft, and a draft leaves only after
+an explicit approval followed by an explicit send. Editing a draft withdraws its
+approval, so an approved draft is always the text somebody read. Mail
+permissions are also tenant-wide and the mailbox is a single configured address
+— see [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md).
 
 Do not put production data in this system until authentication exists. See [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md).
 

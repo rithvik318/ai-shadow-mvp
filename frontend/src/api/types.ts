@@ -258,3 +258,268 @@ export interface MemoryUpdate {
   active?: boolean;
   expires_at?: IsoDateTime | null;
 }
+
+// --- Email Agent (backend/app/schemas/email_schema.py) -------------------
+
+export type EmailDraftStatus =
+  | "draft"
+  | "needs_review"
+  | "approved"
+  | "sending"
+  | "sent"
+  | "failed";
+
+export type EmailCategory =
+  | "urgent"
+  | "needs_reply"
+  | "fyi"
+  | "follow_up"
+  | "low_priority";
+
+export type EmailPriority = "high" | "normal" | "low";
+
+export type EmailTemplateCategory =
+  | "introduction"
+  | "follow_up"
+  | "meeting_request"
+  | "proposal_follow_up"
+  | "thank_you"
+  | "outreach"
+  | "custom";
+
+export const EMAIL_TEMPLATE_CATEGORIES: readonly EmailTemplateCategory[] = [
+  "introduction",
+  "follow_up",
+  "meeting_request",
+  "proposal_follow_up",
+  "thank_you",
+  "outreach",
+  "custom",
+] as const;
+
+/**
+ * Every operation `POST /email/compose` accepts. One endpoint, not ten:
+ * "shorten" and "make more professional" differ by a sentence of instruction.
+ */
+export type EmailOperation =
+  | "generate"
+  | "reply"
+  | "rewrite"
+  | "improve"
+  | "shorten"
+  | "expand"
+  | "change_tone"
+  | "professional"
+  | "concise"
+  | "subject";
+
+export interface EmailTemplate {
+  id: Uuid;
+  name: string;
+  description: string | null;
+  category: EmailTemplateCategory;
+  subject_template: string;
+  body_template: string;
+  /** Derived from the text by the backend, never stored. */
+  placeholders: string[];
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface EmailTemplateList {
+  items: EmailTemplate[];
+  total: number;
+}
+
+export interface EmailTemplateCreate {
+  name: string;
+  subject_template: string;
+  body_template: string;
+  description?: string | null;
+  category?: EmailTemplateCategory;
+}
+
+export type EmailTemplateUpdate = Partial<EmailTemplateCreate>;
+
+export interface EmailTemplateFilled {
+  subject: string;
+  body: string;
+  /** Placeholders still unfilled — left visible in the text, not blanked. */
+  missing: string[];
+}
+
+export interface EmailAttachment {
+  id: Uuid;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  created_at: IsoDateTime;
+}
+
+export interface EmailDraft {
+  id: Uuid;
+  to_recipients: string[];
+  cc_recipients: string[];
+  bcc_recipients: string[];
+  subject: string;
+  body: string;
+  status: EmailDraftStatus;
+  generated_by_ai: boolean;
+  template_id: Uuid | null;
+  in_reply_to_message_id: string | null;
+  provider: string | null;
+  provider_message_id: string | null;
+  provider_thread_id: string | null;
+  approved_at: IsoDateTime | null;
+  sent_at: IsoDateTime | null;
+  send_error: string | null;
+  attachments: EmailAttachment[];
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface EmailDraftList {
+  items: EmailDraft[];
+  total: number;
+}
+
+export interface EmailDraftCreate {
+  to_recipients?: string[];
+  cc_recipients?: string[];
+  bcc_recipients?: string[];
+  subject?: string;
+  body?: string;
+  template_id?: Uuid | null;
+  in_reply_to_message_id?: string | null;
+  provider_thread_id?: string | null;
+  generated_by_ai?: boolean;
+}
+
+export type EmailDraftUpdate = Omit<EmailDraftCreate, "generated_by_ai">;
+
+export interface ComposeRequest {
+  operation: EmailOperation;
+  instruction?: string | null;
+  subject?: string;
+  body?: string;
+  tone?: string | null;
+  recipients?: string[];
+  source_subject?: string | null;
+  source_body?: string | null;
+  source_sender?: string | null;
+  use_knowledge_base?: boolean;
+}
+
+export interface ComposeSource {
+  document: string;
+  section: string | null;
+  page: number | null;
+  similarity: number;
+  document_id: Uuid;
+  chunk_id: Uuid;
+}
+
+export interface ComposeResponse {
+  subject: string;
+  body: string;
+  operation: EmailOperation;
+  sources: ComposeSource[];
+  /** False means no company knowledge reached the model. */
+  knowledge_used: boolean;
+  /** False means this twin has no profile yet. */
+  persona_used: boolean;
+}
+
+export interface EmailProviderStatus {
+  provider: string | null;
+  configured: boolean;
+  connected: boolean;
+  mailbox: string | null;
+  detail: string | null;
+  capabilities: string[];
+}
+
+export interface EmailMessageAddress {
+  address: string;
+  name: string | null;
+}
+
+export interface EmailMessageAttachment {
+  attachment_id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+}
+
+export interface EmailMessage {
+  message_id: string;
+  thread_id: string | null;
+  sender: EmailMessageAddress | null;
+  to_recipients: EmailMessageAddress[];
+  cc_recipients: EmailMessageAddress[];
+  subject: string;
+  snippet: string;
+  body: string | null;
+  received_at: IsoDateTime | null;
+  attachments: EmailMessageAttachment[];
+  folder: string | null;
+  labels: string[];
+  is_read: boolean | null;
+}
+
+export interface EmailAssessment {
+  id: Uuid;
+  provider: string;
+  provider_message_id: string;
+  provider_thread_id: string | null;
+  subject: string | null;
+  sender: string | null;
+  received_at: IsoDateTime | null;
+  category: EmailCategory;
+  priority: EmailPriority;
+  summary: string;
+  suggested_action: string | null;
+  action_items: string[];
+  follow_up_recommended: boolean;
+  follow_up_reason: string | null;
+  follow_up_due_at: IsoDateTime | null;
+  handled: boolean;
+  assessed_at: IsoDateTime;
+}
+
+export interface EmailAssessmentList {
+  items: EmailAssessment[];
+  total: number;
+}
+
+/** A message with this user's assessment of it, or null if untriaged. */
+export interface TriagedMessage {
+  message: EmailMessage;
+  assessment: EmailAssessment | null;
+}
+
+export interface EmailInbox {
+  items: TriagedMessage[];
+  total: number;
+}
+
+/** A message supplied by the caller rather than fetched from a mailbox. */
+export interface EmailMessageInput {
+  message_id: string;
+  thread_id?: string | null;
+  sender?: string | null;
+  to_recipients?: string[];
+  cc_recipients?: string[];
+  subject?: string;
+  body?: string;
+  received_at?: IsoDateTime | null;
+}
+
+export interface EmailThreadSummary {
+  summary: string;
+  action_items: string[];
+  suggested_action: string | null;
+  follow_up_recommended: boolean;
+  follow_up_reason: string | null;
+  message_count: number;
+}

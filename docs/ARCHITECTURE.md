@@ -27,13 +27,19 @@ HTTP  ──▶  API layer            app/api/
              │                    │
              │                    ▼
              │                  LLM layer          app/services/llm/
-             │                  the only place that knows a provider name
+             │                  the only place that knows an LLM vendor
+             │
+             ├──────────────▶   External providers  app/services/graph/
+             │                                      app/services/email/provider/
+             │                  the only places that know a SaaS vendor
              ▼
            Persistence          app/models/, app/database/
                                 SQLAlchemy models, engine, session
 ```
 
 Dependencies point strictly inward. A feature service may use an engine; an engine may use the LLM layer; nothing lower reaches back up. Configuration (`app/config/`), the exception hierarchy (`app/core/`) and prompt templates (`app/prompts/`) are leaves that any layer may import.
+
+There are three vendor boundaries and they are the same idea applied three times. `app/services/llm/client.py` is the only module that names an LLM provider. `app/services/graph/` is the only package that knows what a bearer token or a drive id is. `app/services/email/provider/` is the only package that knows what Outlook is — everything above it speaks in the provider-neutral dataclasses declared in `base.py`, and nothing inside it imports a model, a schema or a service. Adding Gmail is a module beside `outlook_provider.py` and one entry in the registry.
 
 ---
 
@@ -178,6 +184,33 @@ is nullable and NULL means "identity unknown", which never matches, so documents
 predating the column are never wrongly deduplicated. `source_uri` is unique per
 user where present, via a partial index.
 
+Migration `0006` added four email tables — `email_template`, `email_draft`,
+`email_attachment` and `email_assessment` — all owned by a `User` the way the
+Digital Twin is. Two decisions there are worth restating because they are easy
+to reverse by accident.
+
+**There is no message table.** A mailbox is somebody else's system of record,
+and a copy of it here would be a mirror that silently drifts. `email_assessment`
+stores what triage *concluded* about a message, keyed by `provider` plus that
+provider's own message id, together with the subject, sender and timestamp a
+person needs to recognise the row. Bodies are not stored, and messages are read
+from the provider on demand.
+
+**Provider identifiers are plain nullable strings with a `provider` column
+beside them**, never foreign keys and never parsed. An Outlook id and a Gmail
+id are both strings, so a second provider is neither a migration nor a new
+column — which is what keeps Microsoft Graph out of the schema entirely.
+
+Every timestamp on those four tables is `UtcDateTime` rather than a plain
+`DateTime(timezone=True)`. The difference is that the declaration is actually
+enforced: Postgres honours `timezone=True`, SQLite silently ignores it, and
+SQLAlchemy's SQLite bind processor formats a datetime from its clock fields
+while discarding `tzinfo` — so an offset-bearing value would be stored as its
+local wall clock and read back as UTC. The decorator converts to UTC before
+binding and labels UTC on reading, which keeps the instant intact both ways and
+means code above it never has to ask which database it is on. That is the same
+bargain `app/database/vector.py` strikes for cosine distance.
+
 `users`, `digital_twin_profile` and `digital_twin_memory` were added later (migrations `0002` and `0003`). The twin tables carry a UUID `user_id` foreign key into `users`; the document tables keep a plain string `user_id`, and it stays the shared `MVP_USER_ID`. That asymmetry is intentional: **the corpus is company-wide and the twin is personal.** See [`PROJECT_STATE.md`](PROJECT_STATE.md).
 
 ---
@@ -286,6 +319,65 @@ answered from the documents alone.
 
 ---
 
+## 6a. Email Agent
+
+```
+POST /email/compose
+   │
+   ├──▶ profile_service + memory_service + persona_service   who is writing
+   ├──▶ retrieval_service + context_service                  what is true
+   │        (only when use_knowledge_base; otherwise the prompt
+   │         explicitly states that nothing was retrieved)
+   ▼
+   analysis_engine.run(prompt, GeneratedEmail, **variables)
+   │
+   ▼
+   {subject, body} + the passages retrieval actually supplied
+```
+
+Nothing above is new machinery. The composer is an orchestrator in exactly the
+sense `chat_service` is: it asks four existing services for their pieces and
+composes them. There is no email persona, no email retriever and no email
+prompt mechanism.
+
+The one genuinely new idea is the **operation**. Ten named transformations —
+`generate`, `reply`, `rewrite`, `improve`, `shorten`, `expand`, `change_tone`,
+`professional`, `concise`, `subject` — share three prompts, because they differ
+by a sentence of instruction rather than by a mechanism. Ten endpoints that
+differed by a sentence would be ten things to keep in step.
+
+Every operation runs through the `AnalysisEngine` with a Pydantic response
+model, which is what closes the "component without a caller" exception recorded
+against it. That matters most for triage: a malformed reply to "write me an
+email" is visible to whoever reads the draft, while a malformed reply to "is
+this urgent" would become a label in a list nobody re-reads.
+
+### The send path
+
+```
+generate ──▶ save ──▶ review ──▶ approve ──▶ send ──▶ sent | failed
+                        ▲           │
+                        └───────────┘
+                    any edit withdraws approval
+```
+
+Three refusals hold this together, and each is a test rather than a convention:
+
+1. `sending_service.send_draft` raises unless the draft is `approved`, and it
+   checks that **before** resolving a provider — so an unapproved draft is
+   refused for being unapproved even on a fully connected system.
+2. Every mutation in `draft_service` funnels through `_touch`, which clears
+   `approved_at` and returns the draft to `draft`. Approval therefore always
+   means "send *this* text", never "send whatever is in this row at send time".
+3. `sent` is written in one place, on a `SendReceipt` from a provider. Every
+   failure path writes `failed` with a reason. There is no provider in the
+   codebase that fabricates a receipt, so there is no path to a false `sent`.
+
+Nothing in the LLM layer can reach a provider, and nothing in the provider
+package can reach a service. The agent writes; a person approves; the sending
+service sends.
+
+---
 ## 7. Error handling
 
 Services raise domain exceptions from `app/core/exceptions.py`. They know nothing about HTTP. Exception handlers registered in `app/main.py` map them:

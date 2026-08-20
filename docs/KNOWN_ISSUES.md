@@ -12,6 +12,49 @@ There is no auth layer. A caller states who they are with the `X-User-ID` header
 - **Mitigation in place:** the Digital Twin is genuinely user-scoped — `users` exists, profile and memory are UUID-keyed to it, and every query filters on that key — so adding auth is a change to where the identity comes from, not a migration or a backfill. The knowledge base is shared by design and is not affected.
 - **Priority:** High — before real user data.
 
+### The corpus has not yet been ingested through Graph
+Credentials are now in place, but no real synchronisation has been run. Every
+Graph behaviour in this repository is verified against a mock transport only.
+- **Impact:** discovery counts, throttling behaviour, folder resolution and the true supported/unsupported split across the ~786 documents are all unmeasured. The corpus is not in the knowledge base.
+- **Mitigation in place:** `scripts/discover_onedrive_sources.py` enumerates and counts without ingesting, so the first contact with Graph is read-only and reversible.
+- **Priority:** High — this is the last unverified link in the chain.
+
+### No mailbox has ever been connected
+The Outlook provider is implemented and unit-tested against a mock transport.
+No SunRadia mailbox has been reached, and the `Mail.Read` / `Mail.Send`
+application permissions have not been granted to the Entra application.
+- **Impact:** listing an inbox and sending do not work. Every Graph mail request shape in this repository is asserted against recorded payloads, not against a live tenant, so the response mapping could still be wrong in ways only a real mailbox will show.
+- **Mitigation in place:** the unconnected state is a supported, tested state rather than a failure — composing, revising, templates, drafts and triage of a supplied message all work without a mailbox. `GET /email/provider/status` reports exactly what is missing and distinguishes "not configured" from "configured but refused", because those need different fixes. There is no simulated provider, so nothing can appear to work when it does not.
+- **Priority:** High — it is the only thing between the Email Agent and real use.
+
+### Mail permissions are separate from file permissions
+The Email Agent shares the Entra application OneDrive sync uses, but
+`Files.Read.All` grants nothing over mail.
+- **Impact:** a tenant that already syncs OneDrive will still get `403` on every mail call until `Mail.Read` and `Mail.Send` are granted and consented.
+- **Mitigation in place:** the `403` is translated into a message that names the missing consent rather than leaving somebody debugging credentials that are in fact fine.
+- **Priority:** High — but it is an administrator action, not code.
+
+### Mail access is tenant-wide, and the mailbox is a single configured address
+Application permissions carry no user, so `Mail.Send` lets the application send
+as any mailbox it can reach, and `EMAIL_MAILBOX_ADDRESS` — not permission — is
+what limits it to one.
+- **Impact:** a configuration mistake could send from the wrong mailbox. Every Digital Twin in a deployment shares that one mailbox, so a draft written as one person is sent from the same address as one written as another.
+- **Mitigation in place:** the mailbox is named explicitly in configuration and is never inferred, and no request body can change it. Sending always requires a human approval, so a wrong mailbox would be visible before the first message left.
+- **Priority:** Medium — revisit alongside authentication, when a per-user mailbox becomes meaningful.
+
+### Email attachment bytes live in the database
+`email_attachment.content` is a `LargeBinary` column rather than a key into an
+object store.
+- **Impact:** attachments occupy database rows and backups, and a draft cannot carry a large file.
+- **Mitigation in place:** `EMAIL_MAX_ATTACHMENT_BYTES` and `EMAIL_MAX_ATTACHMENTS_PER_DRAFT` bound it, and an attachment's whole life is "uploaded, handed to a provider at send time". An object store would be a second storage system, a second failure mode and a second thing to garbage-collect, for a payload that is already capped.
+- **Priority:** Low — the column becomes a key when the cap starts hurting.
+
+### Triage is one message at a time, and costs a model call each
+There is no bulk triage and no background pass over an inbox.
+- **Impact:** a large inbox has to be triaged row by row, on request.
+- **Mitigation in place:** assessments are stored keyed by the provider's message id and updated in place, so re-opening the inbox costs nothing. An untriaged row is shown as "not yet triaged" rather than being guessed at.
+- **Priority:** Low — a bulk pass is easy to add on top of `assess_message`, and should not be added before somebody has an inbox big enough to want it.
+
 ### OneDrive access is tenant-wide, not per-user
 Synchronisation authenticates as the application, not as a person, so its
 Graph permissions are granted once by an administrator and apply to every
@@ -75,10 +118,10 @@ Page boundaries in DOCX are a rendering property, so chunks from a DOCX carry a 
 
 ## Carried-forward decisions to revisit
 
-### One component has no caller
-The Analysis Engine. The LLM provider abstraction left this list when embeddings started using it, and the prompt system left it when chat started rendering `rag_answer` — though the registered `assistant` prompt is still uncalled. The Analysis Engine remains because chat derives its sources from retrieval rather than from validated model output, so nothing currently needs schema-checked JSON.
-- **Impact:** tested code that nothing exercises end to end.
-- **Priority:** Medium — it earns its place if citations move to sentence level; otherwise remove it rather than leaving it indefinitely.
+### One prompt has no caller
+The registered `assistant` prompt. **The Analysis Engine has left this list**: every Email Agent operation runs through it — composing and revising return validated `{subject, body}`, and triage returns a validated category, priority and action list. The LLM provider abstraction left when embeddings started using it, and the prompt system left when chat started rendering `rag_answer`.
+- **Impact:** one registered template nothing renders.
+- **Priority:** Low — it costs a dictionary entry. Remove it if it is still uncalled when the next feature lands.
 
 ### `langchain-text-splitters` carries more weight than it earns
 Used for one function, `RecursiveCharacterTextSplitter`, and pulls a transitive tree considerably larger than that.
