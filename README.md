@@ -1,6 +1,6 @@
 # AI Shadow — Digital Twin MVP
 
-A working assistant for a small team. Each person has a **Digital Twin** — a
+A working assistant for the team. Each person has a **Digital Twin** — a
 profile and a private memory store that shape how the system writes as them —
 sitting over a **shared company knowledge base** built from documents and
 synchronised OneDrive/SharePoint folders.
