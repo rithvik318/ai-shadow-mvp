@@ -13,11 +13,54 @@ There is no auth layer. A caller states who they are with the `X-User-ID` header
 - **Priority:** High — before real user data.
 
 ### The corpus has not yet been ingested through Graph
-Credentials are now in place, but no real synchronisation has been run. Every
-Graph behaviour in this repository is verified against a mock transport only.
-- **Impact:** discovery counts, throttling behaviour, folder resolution and the true supported/unsupported split across the ~786 documents are all unmeasured. The corpus is not in the knowledge base.
-- **Mitigation in place:** `scripts/discover_onedrive_sources.py` enumerates and counts without ingesting, so the first contact with Graph is read-only and reversible.
+Credentials are in place and the owner reports that token acquisition,
+`Files.Read.All` consent and drive visibility all work from their machine. That
+verification is theirs; **no synchronisation has been run from this
+repository's own code against a live tenant**, and every Graph behaviour here
+is verified against a mock transport only. The five configured folders have
+therefore never been resolved to real ids, and nothing has been downloaded.
+- **Impact:** discovery counts, real throttling behaviour, folder resolution against the actual drive, and the true supported/unsupported split across the corpus are all unmeasured. The corpus is not in the knowledge base.
+- **Mitigation in place:** `python -m scripts.discover_onedrive_sources --resolve` resolves every configured folder read-only and reports what it could not find, so the first contact with Graph enumerates rather than ingests, and a wrong path is discovered before any embedding is paid for.
 - **Priority:** High — this is the last unverified link in the chain.
+
+### The knowledge-base folders were shared as `1drv.ms` links
+The five folders were supplied as shortened Microsoft sharing links rather than
+as paths in a known drive. A short link hides which service holds the content,
+and that is the fact deciding whether an application-only token can reach it at
+all — so it has to be followed before anything can be concluded.
+- **Impact:** until each link's destination host is known, a `403` from Graph is ambiguous between "the application lacks consent for this tenant's content" and "the content is not in this tenant at all". The second cannot be fixed by any permission grant, and mistaking it for the first is an open-ended loop of granting permissions.
+- **Mitigation in place:** `python -m scripts.discover_onedrive_sources --diagnose` follows each link, classifies the destination, and reports a separate verdict per source — `resolved`, `not_found`, `access_denied`, `outside_tenant` or `unreachable` — with the remedy that matches. `outside_tenant` is decided from the host without asking Graph, precisely so its `403` cannot be misread.
+- **Priority:** High — it gates the corpus.
+
+### `Files.Read.All` was over-specified as needing `Sites.Read.All`
+Earlier configuration notes and the Graph client's own `403` message told
+readers the application "may lack Files.Read.All or Sites.Read.All consent".
+As an *application* permission, `Files.Read.All` is defined as read access to
+files in all site collections — SharePoint document libraries included — so
+`Sites.Read.All` was never required for anything this application does. It
+governs the `/sites` discovery endpoints, which are not called.
+- **Impact:** a `403` pointed at a permission that could not have caused it, which is how a permissions investigation becomes a week long.
+- **Mitigation in place:** corrected in `app/services/graph/client.py`, `.env.example` and the README. The message now names `Files.Read.All` alone and says the alternative is content outside the tenant.
+- **Priority:** Resolved.
+
+### Enum columns carry no database-level CHECK constraint
+Every enum column in the schema is created with `sa.Enum(..., native_enum=False)`,
+whose `create_constraint` has defaulted to `False` since SQLAlchemy 1.4 — so the
+`varchar + CHECK` the surrounding code comments describe was never emitted, on
+any table. Verified against a real PostgreSQL 16 database: `pg_constraint` holds
+no check rows for `task`.
+- **Impact:** a value outside the enum can be written by anything that bypasses the ORM — a manual `UPDATE`, a migration, a future service using Core. Application writes are still validated by Pydantic at the boundary and by SQLAlchemy's enum on the way in, so nothing in the running system can produce one.
+- **Mitigation in place:** none beyond the application layer. Migration `0011` documents the finding rather than quietly emitting no-op `ALTER COLUMN` statements that would imply a guarantee the database does not give.
+- **Priority:** Low — closing it means adding constraints to every enum column across seven tables, which is its own change with its own migration.
+
+### Source status is per-run, not cumulative
+`onedrive_sync_state` stores the counts of the **last** run per source, so
+`last_indexed` after a quiet incremental run is a small number even when the
+folder holds hundreds of documents. Corpus size comes from
+`GET /documents/stats` instead.
+- **Impact:** a reader could mistake "3 files added last night" for "3 files in this folder". The Knowledge Base screen labels them "Examined/Added/Updated" for the last run to avoid it, but the underlying table genuinely holds no history.
+- **Mitigation in place:** totals are read from the corpus, not summed from source rows.
+- **Priority:** Low — a per-source document count would need either a run-history table or a `source_key` column on `documents`, and neither has earned its place yet.
 
 ### No mailbox has ever been connected
 The Outlook provider is implemented and unit-tested against a mock transport.
@@ -115,6 +158,27 @@ Page boundaries in DOCX are a rendering property, so chunks from a DOCX carry a 
 - **Priority:** Medium — the first thing to check with real uploads. If quality is poor, `unstructured` is the alternative to evaluate, at a significant dependency cost.
 
 ---
+
+### A digest's window can be cut short by the provider page bound
+`EmailProvider.list_messages` takes a limit and no date range — deliberately, because a date filter is expressible in exactly one vendor's query language and putting it in the boundary would leak Graph's dialect upward. So a digest asks for `DEFAULT_MESSAGE_LIMIT` (400) messages and filters them to the period. If that page is full *and* its oldest message still falls inside the window, earlier messages in the period are not counted. The digest reports `truncated: true` with an explanation rather than presenting the partial count as a total, so nothing is silently wrong — but the number is a floor, not a total. The fix is to widen the provider boundary to take a date range and implement it per provider, which is its own change.
+
+### Report periods are UTC, not the reader's timezone
+Every stored period is a UTC calendar week or month, so somebody in IST sees a week that begins at 05:30 their time. The alternative — a per-user timezone — would change what a *stored* period means when the user edited it, making historical reports retroactively cover different days. A fixed reference frame is what keeps history comparable, so it wins, and the cost is recorded here rather than hidden.
+
+### The administrator bootstrap can be ambiguous at second resolution
+With `BOOTSTRAP_ADMIN_EMAIL` unset, the earliest-created user is promoted, ordered by `created_at` then `id`. `created_at` comes from the database clock: on PostgreSQL that is the transaction timestamp at microsecond resolution and separate commits are genuinely ordered, but on SQLite it is second-resolution, so two users created in the same second sort by a random UUID. Set `BOOTSTRAP_ADMIN_EMAIL` for a deployment that needs the choice stated rather than inferred.
+
+### The digest schedule shares the sync scheduler's single-worker assumption
+`REPORT_DIGEST_SCHEDULE_ENABLED` starts a second `SyncScheduler` in the same process, so with more than one worker every worker runs its own timer — the same limitation recorded above for the sync. It matters much less here: the job is idempotent, the unique constraint on `(user_id, report_type, period_start)` makes a duplicate write impossible, and a losing racer re-reads the winner's row. The cost of the duplication is a wasted mailbox read, not a wrong report.
+
+### Only completion is reconstructible for a past week
+A historical work report answers "what did last week look like" from the columns a task carries. `created_at` says whether it existed and `completed_at` says whether it was still open, so those two questions are answered exactly. Every other transition — started, blocked, cancelled — leaves no timestamp, so a task unblocked on Thursday reads unblocked in every report of every earlier week. The report says so implicitly by never claiming otherwise; the alternative is a status-history table, which is a schema nobody has asked for and would change no number on the screen today.
+
+### An enum column's width is set when its migration is written, not when its vocabulary grows
+`sa.Enum(..., native_enum=False)` renders as `VARCHAR(n)` sized to the longest member at that moment. Add a longer member later and the column silently stays too narrow — and **SQLite ignores `VARCHAR` lengths**, so the whole test suite passes while PostgreSQL raises `value too long for type character varying(n)` the first time a person uses the feature. It has happened twice: `task.status` could not hold `in_progress` (the Start button returned a 500), and `documents.status` could not hold `unsupported`. Both are fixed in migration 0013, and `tests/database/test_migration_fidelity.py` now compares the migrated schema against the models on a real PostgreSQL so the next vocabulary change fails a test instead of a user. That test is skipped without a database, so the gap is narrowed rather than closed: a change merged with only the SQLite suite run can still reintroduce it.
+
+### The inbox pages by size, not by cursor
+`EmailProvider.list_messages` takes a count and returns a list. "Load more" therefore re-asks for a larger page rather than continuing from where the last one stopped, which is honest at fifty and a hundred and stops being so in the hundreds — the same messages are fetched again each time. A real cursor is a change to the provider contract (every implementation would have to carry one), so the page is bounded at `EMAIL_INBOX_MAX_PAGE_SIZE` instead and the follow-up is recorded in `ROADMAP.md`.
 
 ## Carried-forward decisions to revisit
 

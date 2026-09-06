@@ -10,6 +10,7 @@ from app.models.document import DocumentStatus
 from app.schemas.document_schema import (
     BatchUploadItem,
     BatchUploadResponse,
+    CorpusStatsResponse,
     DocumentListResponse,
     DocumentResponse,
     ErrorResponse,
@@ -144,6 +145,29 @@ def list_documents(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get(
+    "/stats",
+    response_model=CorpusStatsResponse,
+    summary="How much is in the knowledge base",
+)
+def corpus_stats(db: Session = Depends(get_db)) -> CorpusStatsResponse:
+    """Corpus-wide counts, computed in the database.
+
+    Declared before `/{document_id}` deliberately: FastAPI matches routes in
+    declaration order, and the other way round `stats` would be parsed as a
+    document id and rejected as a malformed UUID.
+    """
+
+    stats = document_service.corpus_stats(db)
+
+    return CorpusStatsResponse(
+        documents=stats.documents,
+        chunks=stats.chunks,
+        embedded_chunks=stats.embedded_chunks,
+        by_status=stats.by_status,
     )
 
 

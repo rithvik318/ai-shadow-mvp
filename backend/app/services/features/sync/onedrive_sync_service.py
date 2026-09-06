@@ -36,6 +36,7 @@ from app.core.constants import MVP_USER_ID
 from app.core.exceptions import (
     DeltaTokenExpiredError,
     GraphError,
+    SourceUnresolvableError,
     SyncAlreadyRunningError,
     SyncNotConfiguredError,
 )
@@ -43,10 +44,11 @@ from app.models.document import IngestionResult
 from app.models.sync import OneDriveSyncState, SyncStatus
 from app.services.features.documents.document_service import delete_document_by_source
 from app.services.features.documents.ingestion_service import ingest_file
+from app.services.features.sync import source_resolver
 from app.services.features.sync.source_config import (
     OneDriveSource,
+    enabled_sources,
     get_source,
-    load_sources,
 )
 from app.services.graph import drive_service
 from app.services.graph.client import GraphClient
@@ -370,29 +372,52 @@ def sync_source(
         if state.drive_id and state.item_id:
             drive_id, item_id = state.drive_id, state.item_id
         else:
-            folder = drive_service.resolve_folder(
-                client,
-                drive_id=source.drive_id,
-                path=source.path,
-                item_id=source.item_id,
-            )
-            drive_id, item_id = folder.drive_id, folder.item_id
+            # One resolver for all three ways a folder can be named — a path,
+            # an item id, or a sharing link. A share-linked folder therefore
+            # needs no manual pinning step before its first sync, and nothing
+            # below this line knows which route it arrived by.
+            resolved = source_resolver.resolve_source(client, source)
+
+            if not resolved.resolved:
+                raise SourceUnresolvableError(
+                    resolved.error or "The source could not be resolved.",
+                    remedy=resolved.remedy,
+                )
+
+            drive_id = str(resolved.drive_id)
+            item_id = str(resolved.item_id)
             state.drive_id, state.item_id = drive_id, item_id
             db.commit()
 
         changes, next_link, mode = _discover(
             client, state, drive_id=drive_id, item_id=item_id, full=full
         )
-    except GraphError as exc:
+    except Exception as exc:  # noqa: BLE001 - see below
         # Nothing was processed, so nothing about the stored state is stale.
         # It is left exactly as it was, including the delta link.
+        #
+        # Broader than `GraphError` on purpose. Whatever went wrong, the row
+        # was already marked `running`, and leaving it that way would block
+        # every future run of this source for six hours over a bug. A Graph
+        # error is safe to repeat verbatim — the client strips query strings —
+        # but anything else is reported by type only, so a stack trace or a
+        # URL never reaches a caller.
+        message = (
+            str(exc)
+            if isinstance(exc, GraphError | SourceUnresolvableError)
+            else f"Synchronisation failed unexpectedly ({type(exc).__name__})."
+        )
+
+        if not isinstance(exc, GraphError | SourceUnresolvableError):
+            logger.exception("onedrive_source_failed", extra={"source": source.key})
+
         state.status = SyncStatus.FAILED
-        state.error_message = str(exc)
+        state.error_message = message
         state.last_duration_ms = int((time.perf_counter() - started) * 1000)
         db.commit()
 
         summary.status = SyncStatus.FAILED
-        summary.error = str(exc)
+        summary.error = message
         summary.duration_seconds = round(time.perf_counter() - started, 3)
 
         return summary
@@ -474,9 +499,21 @@ def sync_all(
     sources: Iterable[OneDriveSource]
 
     if source_key:
-        sources = [get_source(source_key)]
+        named = get_source(source_key)
+
+        if not named.enabled:
+            # Naming a disabled source is almost always a surprise rather than
+            # an override, and syncing it would contradict the configuration
+            # the deployment is running.
+            raise SyncNotConfiguredError(
+                f'Source {named.key!r} is disabled. Set "enabled": true in '
+                "ONEDRIVE_SOURCES to synchronise it."
+            )
+
+        sources = [named]
     else:
-        sources = load_sources()
+        # Disabled sources are configuration, not work.
+        sources = enabled_sources()
 
         if not sources:
             raise SyncNotConfiguredError(
@@ -501,6 +538,24 @@ def sync_all(
                     mode="skipped",
                     status=SyncStatus.RUNNING,
                     error=str(exc),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - isolation is the whole point
+            # `sync_source` already turns everything it can into a summary.
+            # This catches what it cannot — a database error while claiming the
+            # run, say — so that one broken source still does not decide the
+            # fate of the other four.
+            logger.exception("onedrive_source_aborted", extra={"source": source.key})
+
+            db.rollback()
+
+            summaries.append(
+                SyncSummary(
+                    source_key=source.key,
+                    label=source.label,
+                    mode="aborted",
+                    status=SyncStatus.FAILED,
+                    error=f"Synchronisation aborted ({type(exc).__name__}).",
                 )
             )
 

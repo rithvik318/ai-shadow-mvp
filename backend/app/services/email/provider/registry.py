@@ -1,10 +1,18 @@
 """Choosing the mailbox provider, and being honest when there is none.
 
-Two functions, and the difference between them is the whole point. `status()`
-answers "is a mailbox connected?" and never raises, so a UI can render a setup
-notice instead of an error. `get_provider()` answers "give me the mailbox" and
-raises when there is not one, so no caller can accidentally proceed without a
-provider and then have to invent what would have happened.
+Two functions, and the difference between them is the whole point. `status_for`
+answers "is this mailbox reachable?" and never raises, so a UI can render a
+setup notice instead of an error. `get_provider()` answers "give me the
+mailbox" and raises when there is not one, so no caller can accidentally
+proceed without a provider and then have to invent what would have happened.
+
+**Which mailbox is an argument, not a global.** `get_provider(mailbox=...)` is
+how a per-user mailbox reaches a provider — see
+`services/features/email/mailbox_config_service.py`, which owns the question of
+whose mailbox that is. Omitting it falls back to `EMAIL_MAILBOX_ADDRESS`, which
+exists only for single-user and development deployments; this module does not
+decide when that is acceptable, because that decision needs a user and this
+layer deliberately has none.
 
 **There is no null provider, no in-memory provider and no demo provider.** A
 provider that accepts a send and returns success without a mailbox would make
@@ -32,8 +40,15 @@ _BUILDERS = {
 NOT_CONFIGURED_DETAIL = (
     "No mailbox is connected. Drafting, rewriting, templates and saved drafts "
     "all work without one; listing an inbox and sending do not. Set "
-    "EMAIL_PROVIDER and EMAIL_MAILBOX_ADDRESS on the server to connect one."
+    "EMAIL_PROVIDER on the server, then connect a mailbox with "
+    "PUT /email/mailbox."
 )
+
+
+def supported_provider_names() -> list[str]:
+    """Every provider name this build can construct."""
+
+    return sorted(_BUILDERS)
 
 
 def configured_provider_name() -> str | None:
@@ -44,16 +59,22 @@ def configured_provider_name() -> str | None:
     return name or None
 
 
-def get_provider() -> EmailProvider:
-    """The configured provider, or refuse.
+def get_provider(
+    *, mailbox: str | None = None, provider: str | None = None
+) -> EmailProvider:
+    """The provider for a mailbox, or refuse.
 
     Constructed per call rather than cached. The construction is cheap — the
     expensive thing is the Graph token, and `GraphClient` caches that itself —
     and a module-level instance would hold configuration read at import time,
     which is exactly the pattern `app/services/llm/client.py` exists to avoid.
+
+    Caching would also be wrong now for a second reason: one process serves
+    many users with different mailboxes, and a cached provider would be bound
+    to whichever mailbox asked first.
     """
 
-    name = configured_provider_name()
+    name = (provider or "").strip().lower() or configured_provider_name()
 
     if name is None:
         raise EmailProviderNotConfiguredError(NOT_CONFIGURED_DETAIL)
@@ -63,21 +84,23 @@ def get_provider() -> EmailProvider:
     if builder is None:
         raise EmailProviderNotConfiguredError(
             f"EMAIL_PROVIDER is set to {name!r}, which is not a provider this "
-            "build knows. Supported: " + ", ".join(sorted(_BUILDERS)) + "."
+            "build knows. Supported: " + ", ".join(supported_provider_names()) + "."
         )
 
-    return builder()
+    return builder(mailbox=mailbox)
 
 
-def status() -> ProviderStatus:
-    """Describe the mailbox connection without raising, ever.
+def status_for(
+    *, mailbox: str | None = None, provider: str | None = None
+) -> ProviderStatus:
+    """Describe a mailbox connection without raising, ever.
 
     Called on every load of the email workspace, so a failure here must not be
     able to take the page down — hence the broad catch. What it returns is
     always a describable state, never an exception.
     """
 
-    name = configured_provider_name()
+    name = (provider or "").strip().lower() or configured_provider_name()
 
     if name is None:
         return ProviderStatus(
@@ -88,7 +111,7 @@ def status() -> ProviderStatus:
         )
 
     try:
-        return get_provider().status()
+        return get_provider(mailbox=mailbox, provider=name).status()
     except EmailProviderNotConfiguredError as exc:
         return ProviderStatus(
             provider=name, configured=False, connected=False, detail=str(exc)
@@ -100,8 +123,20 @@ def status() -> ProviderStatus:
             provider=name,
             configured=True,
             connected=False,
+            mailbox=mailbox,
             detail=(
                 "The mailbox provider could not be reached. The server log has "
                 "the details."
             ),
         )
+
+
+def status() -> ProviderStatus:
+    """The deployment-level connection state, with no user in scope.
+
+    Retained for callers that legitimately have no user — server diagnostics.
+    Anything acting for a person asks
+    `mailbox_config_service.status_of(db, user_id=...)` instead.
+    """
+
+    return status_for()

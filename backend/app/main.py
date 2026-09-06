@@ -12,13 +12,16 @@ from app.api.email_routes import router as email_router
 from app.api.email_template_routes import router as email_template_router
 from app.api.memory_routes import router as memory_router
 from app.api.profile_routes import router as profile_router
+from app.api.report_routes import router as report_router
 from app.api.search_routes import router as search_router
 from app.api.sync_routes import router as sync_router
+from app.api.task_routes import router as task_router
 from app.api.user_routes import router as user_router
 from app.config.settings import settings
 from app.core.exceptions import (
     AnalysisValidationError,
     BatchTooLargeError,
+    CalendarError,
     DigitalTwinError,
     DocumentError,
     DocumentNotFoundError,
@@ -40,23 +43,34 @@ from app.core.exceptions import (
     EmbeddingError,
     EmptyAttachmentError,
     EmptyDocumentError,
+    EventNotFoundError,
+    EventValidationError,
     GraphError,
     IdentityError,
     LLMServiceError,
     MalformedIdentityError,
     MemoryNotFoundError,
     MissingIdentityError,
+    NotAuthorisedError,
     ProfileIncompleteError,
     ProfileNotFoundError,
+    ReportError,
+    ReportPeriodError,
     RetrievalError,
+    SourceUnresolvableError,
     SyncAlreadyRunningError,
     SyncError,
     SyncNotConfiguredError,
     SyncSourceNotFoundError,
+    TaskError,
+    TaskNotFoundError,
+    TaskTransitionError,
+    TaskValidationError,
     TooManyAttachmentsError,
     UnsupportedDocumentTypeError,
     UserNotFoundError,
 )
+from app.models.sync import SyncStatus
 from app.prompts import register_default_prompts
 from app.services.features.sync.scheduler import SyncScheduler
 
@@ -68,6 +82,13 @@ def _run_scheduled_sync() -> None:
 
     The request-scoped dependency is not available here — nothing is handling
     a request — so the session is opened and closed around the work.
+
+    Nothing raised here escapes to the loop by design: `SyncScheduler.tick`
+    catches anything, and a scheduled job that dies on its first bad night is
+    worse than one that logs and tries again. What is handled explicitly is
+    the one case that is not a fault at all — a deployment with the schedule
+    switched on and no folders configured yet, which would otherwise log a
+    stack trace every hour and train everyone to ignore the log.
     """
 
     from app.database.database import SessionLocal
@@ -76,10 +97,103 @@ def _run_scheduled_sync() -> None:
     db = SessionLocal()
     try:
         summaries = onedrive_sync_service.sync_all(db)
-        logger.info(
-            "scheduled_sync_completed",
-            extra={"sources": len(summaries)},
+    except SyncNotConfiguredError as exc:
+        logger.warning("scheduled_sync_skipped", extra={"reason": str(exc)})
+        return
+    finally:
+        db.close()
+
+    logger.info(
+        "scheduled_sync_completed",
+        extra={
+            "sources": len(summaries),
+            # Per-source, because "the sync ran" is not the same claim as
+            # "every folder is up to date", and only the second is useful when
+            # one of five has been failing since Tuesday.
+            "succeeded": sum(
+                1 for summary in summaries if summary.status is SyncStatus.SUCCEEDED
+            ),
+            "failed": sum(
+                1 for summary in summaries if summary.status is SyncStatus.FAILED
+            ),
+            "indexed": sum(summary.indexed for summary in summaries),
+            "replaced": sum(summary.replaced for summary in summaries),
+            "deleted": sum(summary.deleted for summary in summaries),
+        },
+    )
+
+
+def _run_scheduled_digests() -> None:
+    """One tick of the digest job: snapshot every user's last closed period.
+
+    Deliberately the same `SyncScheduler` the OneDrive job uses rather than a
+    workflow engine. The work is one periodic call in a process already running
+    an event loop, and the standing rule in CLAUDE.md is that a second piece of
+    infrastructure has to earn its place. Nothing here orchestrates: it asks
+    the store whether the last completed week and month are recorded, and
+    records them if not.
+
+    Cheap when there is nothing to do, which is what makes an hourly check
+    reasonable: a period already snapshotted costs one indexed lookup per user
+    per type and no mailbox call at all.
+    """
+
+    from app.database.database import SessionLocal
+    from app.services.features.reports import generation_service
+    from app.services.features.users import user_service
+
+    db = SessionLocal()
+    try:
+        users = user_service.list_users(db)
+
+        if not users:
+            return
+
+        results = generation_service.generate_due_digests(
+            db, user_ids=[user.id for user in users]
         )
+    finally:
+        db.close()
+
+    logger.info(
+        "scheduled_digests_completed",
+        extra={
+            "users": len(users),
+            "reports": len(results),
+            # Split, because "the job ran" is a weaker claim than "every user
+            # has a digest": a run in which forty of forty-one users have no
+            # mailbox connected is a configuration story, not a failure.
+            "recorded": sum(1 for item in results if not item.from_history),
+            "unavailable": sum(
+                1
+                for item in results
+                if item.status is not None and str(item.status) == "unavailable"
+            ),
+        },
+    )
+
+
+def _bootstrap_admin() -> None:
+    """Make sure somebody can administer this deployment.
+
+    Runs on startup rather than in a migration because it depends on the
+    *users* a deployment has, which a schema migration must not know about, and
+    because a fresh install has none — the first user created through the API
+    becomes the administrator on the next start.
+
+    Never fatal. A deployment that cannot reach its database at startup has a
+    louder problem than this, and refusing to serve because a bootstrap check
+    failed would turn a missing administrator into an outage.
+    """
+
+    from app.database.database import SessionLocal
+    from app.services.features.users import bootstrap_service
+
+    db = SessionLocal()
+    try:
+        bootstrap_service.ensure_admin(db)
+    except Exception:  # noqa: BLE001 - startup must survive a bootstrap failure
+        logger.exception("admin_bootstrap_failed")
     finally:
         db.close()
 
@@ -87,6 +201,11 @@ def _run_scheduled_sync() -> None:
 scheduler = SyncScheduler(
     _run_scheduled_sync,
     interval_seconds=max(settings.ONEDRIVE_SYNC_INTERVAL_SECONDS, 1),
+)
+
+digest_scheduler = SyncScheduler(
+    _run_scheduled_digests,
+    interval_seconds=max(settings.REPORT_DIGEST_INTERVAL_SECONDS, 1),
 )
 
 
@@ -99,13 +218,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     does not run there and no test can accidentally start a background job.
     """
 
+    _bootstrap_admin()
+
     if settings.ONEDRIVE_SYNC_ENABLED:
         await scheduler.start()
+
+    if settings.REPORT_DIGEST_SCHEDULE_ENABLED:
+        await digest_scheduler.start()
 
     try:
         yield
     finally:
         await scheduler.stop()
+        await digest_scheduler.stop()
 
 
 app = FastAPI(
@@ -183,6 +308,9 @@ async def handle_digital_twin_error(
 
 
 _IDENTITY_ERROR_STATUS: list[tuple[type[IdentityError], int]] = [
+    # Known caller, insufficient rights. Not 401: repeating the request with
+    # the same identity will never succeed, so a login prompt would mislead.
+    (NotAuthorisedError, 403),
     # 401 rather than 400: the request is well formed, it just does not say who
     # it is for. That is the status a client can act on once the header becomes
     # a real session.
@@ -302,8 +430,82 @@ async def handle_email_error(request: Request, exc: EmailError) -> JSONResponse:
     )
 
 
+_TASK_ERROR_STATUS: list[tuple[type[TaskError], int]] = [
+    # 404 rather than 403 for a task belonging to somebody else. A 403 would
+    # confirm that another person's task exists, which is itself a disclosure.
+    (TaskNotFoundError, 404),
+    # 409 rather than 422, matching the draft rules above: the request is well
+    # formed and the caller owns the task — the server is not in a state where
+    # the move is allowed, and the remedy is an action rather than a correction.
+    (TaskTransitionError, 409),
+    (TaskValidationError, 422),
+]
+
+
+@app.exception_handler(TaskError)
+async def handle_task_error(request: Request, exc: TaskError) -> JSONResponse:
+    status_code = next(
+        (
+            code
+            for error_type, code in _TASK_ERROR_STATUS
+            if isinstance(exc, error_type)
+        ),
+        500,
+    )
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": str(exc), "error": type(exc).__name__},
+    )
+
+
+@app.exception_handler(ReportError)
+async def handle_report_error(request: Request, exc: ReportError) -> JSONResponse:
+    """Report failures. Only one shape so far: a period nobody can name.
+
+    400 rather than 422 because the value is well formed as a string and wrong
+    as a period — the client sent a syntactically valid request this server
+    cannot honour, and the message says which key it should have sent instead.
+    """
+
+    status_code = 400 if isinstance(exc, ReportPeriodError) else 500
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": str(exc), "error": type(exc).__name__},
+    )
+
+
+_CALENDAR_ERROR_STATUS: list[tuple[type[CalendarError], int]] = [
+    (EventNotFoundError, 404),
+    (EventValidationError, 422),
+]
+
+
+@app.exception_handler(CalendarError)
+async def handle_calendar_error(request: Request, exc: CalendarError) -> JSONResponse:
+    status_code = next(
+        (
+            code
+            for error_type, code in _CALENDAR_ERROR_STATUS
+            if isinstance(exc, error_type)
+        ),
+        400,
+    )
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": str(exc), "error": type(exc).__name__},
+    )
+
+
 _SYNC_ERROR_STATUS: list[tuple[type[SyncError], int]] = [
     (SyncSourceNotFoundError, 404),
+    # The source is configured but cannot be turned into a drive item — a
+    # wrong path, or content outside this tenant. 422 rather than 502: Graph
+    # answered, and the thing that needs changing is on this side or in
+    # somebody's sharing settings, not in Graph's availability.
+    (SourceUnresolvableError, 422),
     # Already in flight. 409 rather than 429: nothing is rate-limiting the
     # caller, the resource is simply busy.
     (SyncAlreadyRunningError, 409),
@@ -344,6 +546,8 @@ app.include_router(sync_router)
 app.include_router(email_router)
 app.include_router(email_draft_router)
 app.include_router(email_template_router)
+app.include_router(task_router)
+app.include_router(report_router)
 
 
 @app.get("/", tags=["health"], summary="Service information")

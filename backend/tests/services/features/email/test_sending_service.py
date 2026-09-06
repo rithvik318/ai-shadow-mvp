@@ -152,8 +152,44 @@ def test_a_sent_draft_is_not_sent_twice(db_session: Session, test_user: User) ->
 # --- no mailbox ----------------------------------------------------------
 
 
+@pytest.fixture
+def no_mailbox_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Guarantee "no mailbox" regardless of the developer's local `.env`.
+
+    Every other test in this module injects a `RecordingProvider`, so none of
+    them touches configuration. This one deliberately resolves the provider the
+    way production does — that is the whole point of it — which made it the one
+    test whose outcome depended on whatever happened to be in `.env`.
+
+    On a machine with `EMAIL_PROVIDER=outlook` and a real
+    `EMAIL_MAILBOX_ADDRESS`, the resolver returned a genuine
+    `OutlookEmailProvider` and the test then attempted an actual Graph send
+    against a real mailbox. It was not merely a wrong assertion: it broke the
+    rule in CLAUDE.md §7 that tests never make network calls, and on a developer
+    machine with working credentials it could have sent mail.
+
+    The three settings below are the complete set the resolver consults, so
+    clearing them is equivalent to an unconfigured deployment without patching
+    the resolver itself — the production path stays exactly the one under test.
+    """
+
+    from app.config import settings as settings_module
+
+    unset: tuple[tuple[str, object], ...] = (
+        ("EMAIL_PROVIDER", None),
+        ("EMAIL_MAILBOX_ADDRESS", None),
+        # Only exists once per-user mailboxes landed; guarded so this fixture
+        # works either side of that change rather than erroring on absence.
+        ("EMAIL_ALLOW_SHARED_FALLBACK_MAILBOX", False),
+    )
+
+    for name, value in unset:
+        if hasattr(settings_module.settings, name):
+            monkeypatch.setattr(settings_module.settings, name, value)
+
+
 def test_with_no_mailbox_configured_sending_refuses(
-    db_session: Session, test_user: User
+    db_session: Session, test_user: User, no_mailbox_configured: None
 ) -> None:
     """There is no simulated provider anywhere in this system, so this is the
     only possible outcome — and the draft keeps its approval, because nothing

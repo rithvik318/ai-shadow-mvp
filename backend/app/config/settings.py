@@ -101,6 +101,35 @@ class Settings(BaseSettings):
     ONEDRIVE_SYNC_ENABLED: bool = False
     ONEDRIVE_SYNC_INTERVAL_SECONDS: int = 3600
 
+    # --- Scheduled reports -----------------------------------------------
+    #
+    # Snapshotting each user's last *completed* week and month of email, so a
+    # digest survives the provider ageing the messages out. Off by default for
+    # the same reason the sync is: it reads a third party's mailbox on a timer.
+    #
+    # The interval is a *check*, not a schedule — the job asks whether the last
+    # completed period has been recorded and does nothing if it has, so running
+    # it hourly costs one query per user per type and no mailbox call. That is
+    # what makes it safe to run often, and why there is no cron expression
+    # here: the period boundaries are calendar arithmetic
+    # (`services/features/reports/period.py`), not a crontab.
+    REPORT_DIGEST_SCHEDULE_ENABLED: bool = False
+    REPORT_DIGEST_INTERVAL_SECONDS: int = 3600
+
+    # --- Administrator bootstrap -----------------------------------------
+    #
+    # `is_admin` guards exactly one operation — deleting another person's
+    # Digital Twin — and no endpoint grants it, because one that promoted the
+    # caller would make the check decorative. That leaves a deadlock: a
+    # deployment with users and no administrator can never gain one.
+    #
+    # On startup, if nobody is an administrator, exactly one user is promoted
+    # and the promotion is logged as a warning. This names which: the user with
+    # this email address. Leave it empty and the earliest-created user — the
+    # CEO, the first Digital Twin — is promoted instead. Nobody is ever
+    # demoted, no second person is ever promoted, and no user is ever created.
+    BOOTSTRAP_ADMIN_EMAIL: str | None = None
+
     # --- Email Agent -----------------------------------------------------
     #
     # Which mailbox provider to use, if any. Unset is the supported state: a
@@ -116,10 +145,23 @@ class Settings(BaseSettings):
     # same application before any mailbox call succeeds.
     EMAIL_PROVIDER: str | None = None
 
-    # The mailbox to act on, as a UPN or address. Required by the Outlook
-    # provider: application permissions are tenant-wide and carry no user, so
-    # every Graph mail call has to name whose mailbox it means.
+    # The mailbox to act on, as a UPN or address. Application permissions are
+    # tenant-wide and carry no user, so every Graph mail call has to name whose
+    # mailbox it means.
+    #
+    # This is now a *fallback*, not the mailbox. Each user owns a `user_mailbox`
+    # row (see app/models/email.py), and normal runtime behaviour is per-user.
+    # This setting is only consulted for a user with no mailbox of their own,
+    # and only when the flag below is switched on.
     EMAIL_MAILBOX_ADDRESS: str | None = None
+
+    # Whether a user with no mailbox of their own falls back to
+    # EMAIL_MAILBOX_ADDRESS. **Off by default, and deliberately so.** With it
+    # on, every user of a multi-user deployment reads and sends from the same
+    # inbox — which would look exactly like the feature working while leaking
+    # one person's mail to everybody. Turn it on only for a genuinely
+    # single-user or development deployment.
+    EMAIL_ALLOW_SHARED_FALLBACK_MAILBOX: bool = False
 
     # Attachments live in the database row (see app/models/email.py), so these
     # two are what keeps that decision defensible rather than a liability.
@@ -133,8 +175,43 @@ class Settings(BaseSettings):
     EMAIL_CONTEXT_MAX_CHARS: int = 6000
     EMAIL_RETRIEVAL_TOP_K: int = 4
 
-    # How many messages one inbox page asks the provider for.
-    EMAIL_INBOX_PAGE_SIZE: int = 25
+    # How many messages one inbox page asks the provider for, and the most any
+    # single request may ask for.
+    #
+    # Fifty rather than twenty-five because twenty-five is under a screenful for
+    # anyone with real correspondence, and "Load more" on the second row of the
+    # list is not a page. The ceiling exists so that a client cannot turn one
+    # request into a mailbox crawl: Graph will happily serve a thousand, and a
+    # request that large holds a worker open for as long as it takes.
+    #
+    # This is a page *size*, not a cursor. `EmailProvider.list_messages` takes a
+    # count and returns a list, so "load more" re-asks for a larger page rather
+    # than continuing from where the last one stopped. That is honest at these
+    # sizes and stops being so above a few hundred; a real cursor is a change to
+    # the provider contract and is recorded in docs/ROADMAP.md.
+    EMAIL_INBOX_PAGE_SIZE: int = 50
+    EMAIL_INBOX_MAX_PAGE_SIZE: int = 200
+
+    # --- tasks and the weekly report -------------------------------------
+
+    # How close a deadline has to be before a pending task is shown as
+    # warning (amber). Compared against the due *timestamp*, not the date:
+    # "within three days" is 72 hours, and a date comparison would answer
+    # differently depending on the time of day it was asked.
+    TASK_WARNING_DAYS: int = 3
+
+    # How long an overdue task may sit before the weekly report asks for it to
+    # be escalated to a person. Separate from the warning threshold because
+    # they answer different questions: one is "this needs doing soon", the
+    # other is "this is not getting done".
+    TASK_ESCALATION_DAYS: int = 7
+
+    # Who unresolved work is escalated to. Deliberately unset by default: with
+    # nothing here the report says "Escalation target not identified" rather
+    # than guessing a recipient, which is the one thing an escalation workflow
+    # must never do.
+    ESCALATION_CONTACT_ADDRESS: str | None = None
+    ESCALATION_CONTACT_NAME: str | None = None
 
     LLM_PROVIDER: str = "openrouter"
     LLM_MODEL: str = "openai/gpt-oss-20b"

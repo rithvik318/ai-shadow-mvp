@@ -34,11 +34,28 @@ interface Props {
   onReply: (draft: EmailDraft) => void;
 }
 
+/** The first page, and how much further each press reaches.
+ *
+ * Fifty rather than twenty-five: twenty-five is under a screenful for anybody
+ * with real correspondence, and a Load more button on the second row of a list
+ * is not a page. The ceiling is the server's — a request above it gets the
+ * server's answer, not an error — so this stops offering to load more once the
+ * mailbox has returned fewer messages than were asked for.
+ */
+const INITIAL_PAGE = 50;
+const PAGE_STEP = 50;
+const MAX_PAGE = 200;
+
 export function InboxPanel({ userId, provider, onReply }: Props) {
   const [rows, setRows] = useState<TriagedMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // How many messages this view has asked for. The provider contract takes a
+  // count rather than a cursor, so "load more" re-asks for a larger page. That
+  // is honest at these sizes; a real cursor is a change to the provider
+  // interface and is recorded in docs/ROADMAP.md.
+  const [wanted, setWanted] = useState(INITIAL_PAGE);
 
   const load = useCallback(async () => {
     if (!provider?.connected) return;
@@ -47,7 +64,7 @@ export function InboxPanel({ userId, provider, onReply }: Props) {
     setError(null);
 
     try {
-      const inbox = await api.listEmailMessages(userId);
+      const inbox = await api.listEmailMessages(userId, { limit: wanted });
       setRows(inbox.items);
     } catch (cause) {
       setError(
@@ -56,7 +73,7 @@ export function InboxPanel({ userId, provider, onReply }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [provider?.connected, userId]);
+  }, [provider?.connected, userId, wanted]);
 
   useEffect(() => {
     void load();
@@ -180,6 +197,24 @@ export function InboxPanel({ userId, provider, onReply }: Props) {
           </div>
         ))
       )}
+
+      {/* Offered only while there is reason to think there is more. A full
+          page means the mailbox had at least as many as were asked for; a
+          short one means the end has been reached, and a button that fetches
+          the same list again would be a button that does nothing. */}
+      {!loading && rows.length >= wanted && wanted < MAX_PAGE ? (
+        <div className="pt-1 text-center">
+          <Button
+            type="button"
+            onClick={() => setWanted((current) => Math.min(current + PAGE_STEP, MAX_PAGE))}
+          >
+            Load more
+          </Button>
+          <p className="mt-1 text-xs text-ink-500">
+            Showing the {rows.length} most recent messages.
+          </p>
+        </div>
+      ) : null}
     </div>
   );
 }

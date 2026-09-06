@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app.config.settings import settings
 from app.models.email import EmailAssessment
 from app.services.email.provider.base import EmailMessage, EmailProvider
-from app.services.email.provider.registry import get_provider
+from app.services.features.email import mailbox_config_service
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ def list_inbox(
     stand in for "not connected".
     """
 
-    mailbox = provider if provider is not None else get_provider()
+    mailbox = provider or mailbox_config_service.provider_for(db, user_id=user_id)
     messages = mailbox.list_messages(
         limit=limit or settings.EMAIL_INBOX_PAGE_SIZE, folder=folder
     )
@@ -105,7 +105,7 @@ def get_message(
 ) -> TriagedMessage:
     """One message with its body, and this user's assessment of it if any."""
 
-    mailbox = provider if provider is not None else get_provider()
+    mailbox = provider or mailbox_config_service.provider_for(db, user_id=user_id)
     message = mailbox.get_message(message_id)
 
     assessments = _assessments_for(
@@ -121,15 +121,20 @@ def get_message(
 
 
 def get_thread(
-    thread_id: str, *, provider: EmailProvider | None = None
+    db: Session,
+    thread_id: str,
+    *,
+    user_id: uuid.UUID,
+    provider: EmailProvider | None = None,
 ) -> list[EmailMessage]:
     """Every message in a conversation, oldest first.
 
-    No database argument: a thread is read straight from the provider, and
-    thread summaries are deliberately not stored — a thread grows, and a stored
-    summary of one is wrong as soon as somebody replies.
+    Nothing is stored: thread summaries are deliberately not kept — a thread
+    grows, and a stored summary of one is wrong as soon as somebody replies.
+    The database argument is here only to resolve *whose* mailbox to read, and
+    a thread id is never looked up across users.
     """
 
-    mailbox = provider if provider is not None else get_provider()
+    mailbox = provider or mailbox_config_service.provider_for(db, user_id=user_id)
 
     return mailbox.get_thread(thread_id)

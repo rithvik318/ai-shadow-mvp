@@ -15,6 +15,7 @@ import {
   EDITABLE_PROFILE_TEXT,
   activeMemories,
   countPreferences,
+  describeOwnedData,
   isExpired,
   memoryStateLabel,
   parseList,
@@ -157,5 +158,42 @@ describe("list editing", () => {
 
   it("returns nothing for an empty field", () => {
     assert.deepEqual(parseList("   "), []);
+  });
+});
+
+describe("what a deletion would destroy", () => {
+  it("names each table in the words the product uses", () => {
+    // A table name is not a warning. `email_assessment: 60` tells somebody
+    // nothing about what they are about to lose.
+    assert.deepEqual(
+      describeOwnedData({
+        task: 3,
+        digital_twin_memory: 60,
+        email_draft: 1,
+      }),
+      ["1 email draft", "3 tasks", "60 memories"],
+    );
+  });
+
+  it("leaves out tables with nothing in them", () => {
+    assert.deepEqual(describeOwnedData({ task: 0, email_draft: 2 }), [
+      "2 email drafts",
+    ]);
+  });
+
+  it("uses the singular for one row", () => {
+    assert.deepEqual(describeOwnedData({ digital_twin_memory: 1 }), ["1 memory"]);
+    assert.deepEqual(describeOwnedData({ calendar_event: 1 }), ["1 meeting"]);
+  });
+
+  it("still shows a table it has never heard of", () => {
+    // Silently omitting user data from a deletion warning is the one failure
+    // this function must not have.
+    assert.deepEqual(describeOwnedData({ future_table: 2 }), ["2 future table rows"]);
+  });
+
+  it("says nothing at all for a twin that owns nothing", () => {
+    assert.deepEqual(describeOwnedData({}), []);
+    assert.deepEqual(describeOwnedData({ task: 0 }), []);
   });
 });

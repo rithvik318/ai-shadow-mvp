@@ -12,6 +12,7 @@ import type { Profile, User } from "../../api/types";
 import { countPreferences } from "../../lib/twin";
 import { useTwins } from "../../state/TwinContext";
 import { Button, EmptyState, ErrorNotice, Spinner } from "../ui";
+import { DeleteTwinDialog } from "./DeleteTwinDialog";
 import { TwinWorkspace } from "./TwinWorkspace";
 
 interface TwinCounts {
@@ -22,6 +23,7 @@ interface TwinCounts {
 export function TwinsPanel() {
   const { twins, currentTwin, loading, error, select, refresh, create } = useTwins();
   const [openTwin, setOpenTwin] = useState<User | null>(null);
+  const [deleting, setDeleting] = useState<User | null>(null);
   const [adding, setAdding] = useState(false);
   const [counts, setCounts] = useState<Record<string, TwinCounts>>({});
 
@@ -161,6 +163,14 @@ export function TwinsPanel() {
                         Make active
                       </Button>
                     )}
+                    <Button
+                      type="button"
+                      variant="danger"
+                      onClick={() => setDeleting(twin)}
+                      aria-label={`Delete ${twin.name}`}
+                    >
+                      Delete
+                    </Button>
                   </div>
                 </li>
               );
@@ -168,6 +178,22 @@ export function TwinsPanel() {
           </ul>
         )}
       </div>
+
+      {deleting ? (
+        <DeleteTwinDialog
+          twin={deleting}
+          // The server requires an administrator. Until sign-in exists the
+          // acting identity is the selected twin, which is honest about what
+          // is actually being sent rather than inventing an admin id — a
+          // non-admin simply gets a 403 the dialog shows.
+          adminId={currentTwin?.id ?? deleting.id}
+          onCancel={() => setDeleting(null)}
+          onDeleted={() => {
+            setDeleting(null);
+            void refresh();
+          }}
+        />
+      ) : null}
     </section>
   );
 }

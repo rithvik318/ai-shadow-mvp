@@ -39,8 +39,7 @@ from app.services.email.provider.base import (
     OutgoingAttachment,
     OutgoingEmail,
 )
-from app.services.email.provider.registry import get_provider
-from app.services.features.email import draft_service
+from app.services.features.email import draft_service, mailbox_config_service
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +107,10 @@ def send_draft(
     if not draft.to_recipients:
         raise EmailValidationError("This draft has no recipients.")
 
-    mailbox = provider if provider is not None else get_provider()
+    # Resolved from *this user's* mailbox, never a global one. A send is the
+    # one operation where getting that wrong is unrecoverable: mail would leave
+    # from somebody else's address and there is no unsending it.
+    mailbox = provider or mailbox_config_service.provider_for(db, user_id=user_id)
 
     draft.status = EmailDraftStatus.SENDING
     draft.send_error = None

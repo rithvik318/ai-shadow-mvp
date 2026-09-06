@@ -35,7 +35,7 @@ const TABS: Array<{ id: Tab; label: string; needsMailbox: boolean }> = [
   { id: "follow-ups", label: "Follow-ups", needsMailbox: false },
 ];
 
-export function EmailPanel() {
+export function EmailPanel({ onOpenTasks }: { onOpenTasks: () => void }) {
   const { currentTwin } = useTwins();
   const [tab, setTab] = useState<Tab>("compose");
   const [provider, setProvider] = useState<EmailProviderStatus | null>(null);
@@ -43,11 +43,25 @@ export function EmailPanel() {
   const [openDraft, setOpenDraft] = useState<EmailDraft | null>(null);
   const [draftsToken, setDraftsToken] = useState(0);
 
+  // The mailbox is per-user, so the answer depends on who is selected — and
+  // on the first render nobody is, because `TwinProvider` is still loading the
+  // list. Keying this on the twin's id is what makes the call wait for one and
+  // re-ask when it changes; with an empty dependency list it fired once,
+  // before any identity existed, and came back 401.
+  const twinId = currentTwin?.id ?? null;
+
   const loadProvider = useCallback(async () => {
+    if (!twinId) return;
+
+    // Cleared before the new answer arrives, not after. Leaving the previous
+    // person's status in place meant the Inbox tab rendered against *their*
+    // connection while this person's request was still in flight — showing a
+    // connected mailbox to somebody who has none.
+    setProvider(null);
     setProviderError(null);
 
     try {
-      setProvider(await api.getEmailProviderStatus());
+      setProvider(await api.getEmailProviderStatus(twinId));
     } catch (cause) {
       setProviderError(
         cause instanceof ApiError
@@ -55,7 +69,7 @@ export function EmailPanel() {
           : "Unable to reach the backend to check the mailbox connection.",
       );
     }
-  }, []);
+  }, [twinId]);
 
   useEffect(() => {
     void loadProvider();
@@ -170,7 +184,11 @@ export function EmailPanel() {
             onEdit={editDraft}
           />
         ) : (
-          <FollowUpsPanel userId={currentTwin.id} onDraftReply={editDraft} />
+          <FollowUpsPanel
+            userId={currentTwin.id}
+            onDraftReply={editDraft}
+            onOpenTasks={onOpenTasks}
+          />
         )}
       </div>
     </section>

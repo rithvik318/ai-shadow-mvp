@@ -222,10 +222,17 @@ class GraphClient:
             )
 
         if response.status_code in (401, 403):
+            # Files.Read.All is named alone deliberately. As an *application*
+            # permission it already covers files in all site collections,
+            # SharePoint document libraries included; Sites.Read.All governs
+            # the /sites discovery endpoints, which nothing here calls.
+            # Naming it here sent people granting a permission that could not
+            # have been the cause.
             raise GraphAuthError(
                 f"Graph denied the request (HTTP {response.status_code}"
-                f"{f', {code}' if code else ''}). The application may lack "
-                "Files.Read.All or Sites.Read.All consent."
+                f"{f', {code}' if code else ''}). Either the application lacks "
+                "admin-consented Files.Read.All, or the content is outside "
+                "this tenant, which no consent can change."
             )
 
         raise GraphRequestError(
@@ -400,6 +407,28 @@ class GraphClient:
                 continue
 
             return items, payload.get("@odata.deltaLink")
+
+    def resolve_redirect(self, url: str) -> str:
+        """Follow a shortened Microsoft link to the URL it stands for.
+
+        Not a Graph call and deliberately unauthenticated — a short link is a
+        public redirect, and attaching a bearer token would hand a tenant
+        credential to a host that has no business holding one.
+
+        This exists because `/shares/{token}` is told a URL, and a short link
+        is not the URL of anything: it is a redirect to one. Resolving it first
+        is also the only way to learn which tenant, if any, the content is in.
+        Returns the original URL unchanged if the far end does not redirect.
+
+        The status of the final response is deliberately ignored. What is
+        wanted is the address, not the page: a link to content this caller has
+        no rights to still answers `403` *from the host that holds it*, and
+        that host is the fact worth having. Raising on the status would throw
+        away the answer at exactly the moment it is most useful. Only a genuine
+        transport failure raises, from `_send`.
+        """
+
+        return str(self._send("GET", url, follow_redirects=True).url)
 
     def download(self, url: str) -> bytes:
         """Fetch a file's bytes.

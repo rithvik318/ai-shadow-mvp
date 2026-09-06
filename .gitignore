@@ -37,3 +37,7 @@ Thumbs.db
 knowledge_base_ingestion_results.json
 corpus_retrieval_results.json
 corpus_validation_results.json
+
+# Activity-report extracts. Real correspondence about identifiable
+# people — never commit these, and delete them when the reports are done.
+backend/report_data/

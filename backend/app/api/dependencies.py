@@ -19,7 +19,11 @@ from typing import Annotated
 from fastapi import Depends, Header
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import MalformedIdentityError, MissingIdentityError
+from app.core.exceptions import (
+    MalformedIdentityError,
+    MissingIdentityError,
+    NotAuthorisedError,
+)
 from app.database.session import get_db
 from app.models.user import User
 from app.services.features.users import user_service
@@ -66,3 +70,28 @@ def current_user(
 
 
 CurrentUser = Annotated[User, Depends(current_user)]
+
+
+def current_admin(user: "CurrentUser") -> User:
+    """The caller, but only if they are an administrator.
+
+    Reads `is_admin`, never `role`. `role` is a persona label a person types —
+    "CEO", "CRM Manager" — and treating it as permission would make anybody who
+    writes "Admin" into it one.
+
+    This is the only authorisation check in the codebase, and it guards exactly
+    one thing: acting on *another* user. Everything else is self-service and
+    already scoped by `CurrentUser`, which is a stronger guarantee than a
+    permission check because there is no call shape that reaches another
+    person's data at all.
+    """
+
+    if not user.is_admin:
+        raise NotAuthorisedError(
+            "Only an administrator may act on another user's account."
+        )
+
+    return user
+
+
+CurrentAdmin = Annotated[User, Depends(current_admin)]

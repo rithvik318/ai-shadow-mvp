@@ -5,9 +5,18 @@ project stands, so nothing has to be reconstructed from old conversations. What
 exists, in detail, is [`FEATURES.md`](FEATURES.md); how work gets done here is
 [`../CLAUDE.md`](../CLAUDE.md).
 
-**Checkpoint:** built on `0ff57a3` (`main`). The frontend and the Email Agent
-are in the tree, uncommitted. The frontend has never been installed or built
-with its real dependencies. **Updated:** 2026-08-19.
+**Checkpoint:** built on `0ff57a3` (`main`), plus the tasks/mailbox milestone,
+the OneDrive → Knowledge Base milestone and the reports/digests pass, all
+uncommitted in the tree. The frontend installs, lints, typechecks, tests and
+builds with its real dependencies. **Updated:** 2026-09-02.
+
+The reports pass added stored report history (`generated_report`, migration
+`0012`), the weekly and monthly email digests, a schedule for them reusing
+`SyncScheduler`, the Reports workspace in the frontend, mailbox connection UX,
+a "create tasks from follow-ups" action, and the administrator bootstrap that
+resolves the `is_admin` deadlock. The weekly-report frontend, outstanding from
+the previous milestone, is now in place and is the interactive view of the week
+in progress.
 
 ---
 
@@ -35,23 +44,63 @@ been synchronised from a live tenant, and no mailbox has been connected.
 
 ## Test status
 
-**Backend: 650 at the last local run** (637 plus 13 openapi/graph tests), and
-the Email Agent adds **roughly 150 more**, not yet executed — this box has no
-package registry, so `pytest` could not be run here. Run `pytest -q` from
-`backend/`. What *was* run: `ruff check`, `ruff format --check`, `py_compile`,
-and `python -m scripts.static_check`, which resolves every first-party import
-and checks every first-party call site against its signature.
+**Backend: 1055 passed, 4 skipped**, actually executed with `pytest -q` from
+`backend/` — dependencies now install here, so these numbers are measured
+rather than projected. `ruff check` and `ruff format --check` are clean across
+`app tests scripts alembic`, and `python -m scripts.static_check` resolves every
+first-party import and checks every first-party call site against its signature.
 
-**Frontend: 123 passing**, actually executed — `node --import tsx --test` over
+Note this figure describes **this tree**. A working copy without the
+tasks/mailbox milestone applied sits at a different total, so a mismatch is a
+sign the archives were not extracted rather than a sign of a regression.
+
+**Frontend: 134 passing**, actually executed — `node --import tsx --test` over
 `src/tests/`, covering the API client (endpoint paths, `X-User-ID`
 propagation, error translation) and the upload result mapping. They need no
 browser and no bundler. The React components have **never been built or
 typechecked against real `@types/react`**: the environment they were written in
-had no package registry. They *were* typechecked against a hand-written minimal
-`@types/react` shim, which is clean across the whole tree and which caught two
-real defects in the email components. That is a checking aid, not a substitute.
-Run `npm install && npm run lint && npm run typecheck && npm run test && npm run
-build` in `frontend/` before treating the UI as working.
+had no package registry. `npm install && npm run lint && npm run typecheck && npm run test && npm run
+build` have now all been run and are green. `npm run format:check` still reports
+eight pre-existing files from the Email Agent milestone; they were left alone
+rather than reformatted inside an unrelated change.
+
+## Assumptions made where the brief was ambiguous
+
+Recorded here rather than re-asked, per `CLAUDE.md` §2. Each is a configurable
+default, and each can be changed without touching a service.
+
+- **`OVERDUE` and `ESCALATION_REQUIRED` are display states, not stored ones.**
+  The requested vocabulary lists six task statuses. Four of them — `todo`,
+  `in_progress`, `completed`, `blocked` — are a lifecycle a person controls and
+  are stored (`cancelled` is kept as a fifth: abandoned is not the same as
+  done). The other two are functions of the clock and the escalation rules, so
+  a stored copy is wrong from the moment it is written until something rewrites
+  it. They are computed on read into `display_status`, and the API sends both.
+- **Escalation outranks overdue in `display_status`.** An overdue task tells
+  its owner to get on with it; an escalated one tells them it is no longer
+  theirs alone to finish, which is the louder instruction.
+- **Green covers "completed" and "comfortably within the deadline".** Yellow is
+  `TASK_WARNING_DAYS` (default 3) or fewer remaining; red is overdue, blocked,
+  or escalation-required. All three thresholds are settings.
+- **The escalation target comes from configuration only.** With
+  `ESCALATION_CONTACT_ADDRESS` unset the report reads "Escalation target not
+  identified". The counterparty on the task is deliberately not a fallback:
+  they are usually the person who has not replied, and escalating to them is
+  another follow-up wearing a different hat.
+- **A past meeting nobody has answered for reads `unknown`.** It stays
+  `scheduled` in the row — that is what was recorded — and reads as `unknown`,
+  because that is what is known. Sweeping the transition into the database
+  would need a background job and would be wrong for the window between the
+  meeting ending and the sweep running.
+- **Recipient display names are not stored.** `normalise_recipient_values`
+  reduces `"Name <addr>"` to `addr`, which is what a provider is handed.
+  Keeping a parallel list of names would be a schema change nothing reads.
+  Sender names, where they do matter, are structural on `EmailAssessment`
+  (`sender_name` / `sender_address`), and organiser names on `CalendarEvent`.
+- **The report's window looks seven days back and seven forward.** Forward-only
+  would never surface the meeting nobody has answered for.
+- **Deletion requires typing the twin's name.** The act is irreversible; one
+  click is not enough ceremony for it.
 
 ## Architecture boundaries
 
@@ -71,7 +120,30 @@ build` in `frontend/` before treating the UI as working.
   Services raise domain errors from `app/core/exceptions.py`; only `app/main.py`
   knows status codes. Prompts are registered templates, never inline strings.
 - **One ingestion pipeline.** Single upload, batch upload and OneDrive sync all
-  call `ingestion_service`. Adding a caller must not add a pipeline.
+  call `ingestion_service`. Adding a caller must not add a pipeline. There is
+  likewise one retriever: a synced document and an uploaded one are
+  indistinguishable to `/search` and `/chat`.
+- **One mailbox per person, resolved from the caller.** `user_mailbox` holds
+  it; `mailbox_config_service.provider_for(user_id)` is the only way a provider
+  is built for a user, and it refuses rather than falling back.
+  `EMAIL_MAILBOX_ADDRESS` is a single-user fallback that is **off** unless
+  `EMAIL_ALLOW_SHARED_FALLBACK_MAILBOX` is deliberately set, so no user can
+  silently act as another.
+- **Every user-owned table joins `_OWNED_MODELS`.** A new private table that
+  does not is one whose rows outlive the person they describe;
+  `test_a_deleted_users_events_go_with_them` is what makes forgetting fail.
+- **Derived states are never written back.** `overdue`, `escalation_required`
+  and an unanswered meeting's `unknown` are all computed on read.
+- **No folder is named in code.** `ONEDRIVE_SOURCES` is the only place a
+  OneDrive folder appears, so a sixth source is an environment change. A source
+  carries a stable `key`, an optional human-facing `uri` and an `enabled` flag;
+  disabling one keeps the delta token stored against its key.
+- **Graph ids come from Graph.** `source_resolver` asks Graph where a path is.
+  Nothing decodes an id out of a sharing URL, which is how these integrations
+  usually end up pointed confidently at the wrong folder.
+- **Status is composed, not duplicated.** `GET /sync/onedrive/status` owns
+  per-source facts; `GET /documents/stats` owns corpus totals, counted in the
+  database. There is deliberately no aggregate `/kb/status` restating both.
 - **Graph stays in `app/services/graph/`.** Nothing below the sync service knows
   what a document is; nothing above it knows what a bearer token is.
 - **One sync per source at a time.** The claim is written to
@@ -116,23 +188,34 @@ build` in `frontend/` before treating the UI as working.
 
 ## Current task
 
-None in progress. The frontend awaits its first `npm install` and build. No real
-OneDrive tenant has been synchronised — `ONEDRIVE_SOURCES` is empty, and the
-five SunRadia folders are not yet pointed at anything. No mailbox is connected:
-`EMAIL_PROVIDER` is unset, and the `Mail.Read` / `Mail.Send` consents have not
-been granted to the Entra application.
+None in progress. The OneDrive → Knowledge Base pipeline is complete and tested
+end to end against a mock Graph: configuration, resolution, ingestion, delta
+sync, scheduling, status, the Knowledge Base screen and retrieval with
+attribution.
+
+**No real OneDrive tenant has been synchronised from this code.** The owner
+reports that token acquisition, `Files.Read.All` consent and drive visibility
+all work from their machine; that verification is theirs, not this
+repository's. `ONEDRIVE_SOURCES` is still empty here, so the five SunRadia
+folders have never been resolved to real ids and nothing has been downloaded.
+The next step is `python -m scripts.discover_onedrive_sources --resolve` on a
+machine holding the credentials.
+
+No mailbox is connected: `EMAIL_PROVIDER` is unset, and the `Mail.Read` /
+`Mail.Send` consents have not been granted to the Entra application.
 
 ## Next planned components
 
-1. **Run the suites.** `pytest -q` in `backend/`, and `npm install` then lint,
-   typecheck, test and build in `frontend/`. Nothing else should be built until
-   both are green.
+1. **First real OneDrive sync.** Fill `ONEDRIVE_TENANT_ID`,
+   `ONEDRIVE_CLIENT_ID`, `ONEDRIVE_CLIENT_SECRET` and `ONEDRIVE_DRIVE_ID`, name
+   the five folders by path in `ONEDRIVE_SOURCES`, run
+   `python -m scripts.discover_onedrive_sources --resolve` and paste back the
+   pinned line, then `POST /sync/onedrive` with one source before all five.
 2. **Connect the mailbox.** Grant `Mail.Read` and `Mail.Send` to the existing
    Entra application, set `EMAIL_PROVIDER=outlook` and `EMAIL_MAILBOX_ADDRESS`,
    and check `GET /email/provider/status`. That endpoint reports exactly what is
    missing, and nothing in the Email Agent needs to change when it goes green.
-3. **First real OneDrive sync**, still outstanding from the previous milestone.
-4. **Hardening** — authentication behind `X-User-ID`, CI, background ingestion,
+3. **Hardening** — authentication behind `X-User-ID`, CI, background ingestion,
    and CORS or same-origin serving for the deployed frontend.
 
 ## Known limitations
@@ -142,7 +225,9 @@ been granted to the Entra application.
 - Legacy formats — `.doc`, `.ppt`, `.vsd`, spreadsheets — are reported rather than parsed, and are the largest gap in corpus coverage. No conversion layer was built.
 - The 231 documents already in the knowledge base carry `content_hash = NULL`, so they do not participate in deduplication. They cannot be backfilled: the original bytes were never stored. `scripts/ingest_kb_manifest.py` still skips by filename, so re-running it does not duplicate them; a document acquires a real identity the next time it is uploaded.
 - `source_uri` and `source_version` cannot be set through the HTTP upload API. They are service-level parameters, and OneDrive sync is what supplies them.
-- OneDrive sync has never run against a real tenant. Credentials, a drive id and the five folder paths are all still to be supplied, and Graph's real payloads may differ from the mocked ones in ways only a live run will show.
+- OneDrive sync has never run against a real tenant from this repository. Credentials, a drive id and the five folder paths are all still to be supplied here, and Graph's real payloads may differ from the mocked ones in ways only a live run will show.
+- Sync state stores the counts of the *last* run per source, not a per-source document total. Corpus size comes from `GET /documents/stats`.
+- The weekly-report frontend and the documentation for the tasks/mailbox milestone remain outstanding from that milestone; this one did not address them.
 - Graph permissions are tenant-wide, the scheduled run assumes one worker process, and a sync holds its request open for the whole folder. All three are in `KNOWN_ISSUES.md`.
 - The backend registers no CORS middleware, so the frontend is same-origin only: proxied in development, and expected to be served alongside the API in production.
 - Chat history is not persisted anywhere, and the frontend has no profile or memory editing UI.

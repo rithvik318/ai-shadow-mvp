@@ -349,7 +349,14 @@ class EmailAssessment(Base):
     # Headers, not content. Enough for a person to recognise which message a
     # row is about; the body is read from the provider when it is needed.
     subject: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sender: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Kept apart deliberately. A display name is for a person to read; an
+    # address is what a reply is actually sent to. Storing them joined as
+    # "Robert Keenan <Robert.Keenan@sunradia.com>" forced every consumer that
+    # wanted to reply to parse a display string back into an address, and the
+    # frontend was one such consumer. The provider carries both fields; this
+    # is where that structure stops being thrown away.
+    sender_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sender_address: Mapped[str | None] = mapped_column(String(320), nullable=True)
     received_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
     category: Mapped[EmailCategory] = mapped_column(EmailCategoryType, nullable=False)
@@ -396,4 +403,70 @@ class EmailAssessment(Base):
             "follow_up_recommended",
             "handled",
         ),
+        Index(
+            "ix_email_assessment_sender_address",
+            "user_id",
+            "sender_address",
+        ),
     )
+
+    @property
+    def sender_display(self) -> str | None:
+        """How to show the sender to a person — never what to send mail to.
+
+        The one place the joined form is produced. It exists so that no caller
+        has to build it by hand and then be tempted to reuse the result as an
+        address, which is precisely the defect this pair of columns replaced.
+        """
+
+        if self.sender_name and self.sender_address:
+            return f"{self.sender_name} <{self.sender_address}>"
+
+        return self.sender_address or self.sender_name
+
+
+class UserMailbox(Base):
+    """Which mailbox one person's Email Agent acts on.
+
+    This is the row that replaced `EMAIL_MAILBOX_ADDRESS`. That setting made
+    the mailbox a property of the deployment, so every user of a server shared
+    one inbox and one sending address, and changing whose it was meant editing
+    the environment and restarting.
+
+    **No credentials live here.** Graph application permissions carry no user:
+    the client id and secret authenticate the *application*, and the only thing
+    that varies per person is which mailbox that application is asked to act
+    on. Storing a secret per user would be inventing a second authentication
+    system, which the milestone explicitly rules out.
+
+    `provider` is stored rather than assumed so that one person can be on
+    Outlook while another is on whatever is added next, without a migration.
+    """
+
+    __tablename__ = "user_mailbox"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # Unique, not merely indexed: one mailbox per person is a rule, and a
+    # constraint is the only form of it the database can enforce.
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    address: Mapped[str] = mapped_column(String(320), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        UtcDateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (UniqueConstraint("user_id", name="uq_user_mailbox_user"),)

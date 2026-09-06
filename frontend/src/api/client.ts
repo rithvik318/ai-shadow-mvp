@@ -51,10 +51,48 @@ export class ApiError extends Error {
 export interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
-  /** Sent as `X-User-ID`. Required by chat, profile and memory. */
+  /**
+   * Sent as `X-User-ID`.
+   *
+   * Three states, and the difference matters:
+   *
+   * - **a string** — act as that person. An administrator acting on somebody
+   *   else passes their own id here explicitly.
+   * - **omitted** — act as whoever is selected in the workspace, via
+   *   `setActiveUserId`. This is the default for user-scoped calls, so a new
+   *   endpoint is scoped correctly without anybody remembering to thread an
+   *   id through it.
+   * - **`null`** — send no identity at all, deliberately. The shared corpus
+   *   endpoints use this: `/documents`, `/search` and `/sync` are company-wide,
+   *   and an identity header there would imply a per-user corpus that does not
+   *   exist.
+   */
   userId?: string | null;
   query?: Record<string, string | number | boolean | undefined | null>;
   signal?: AbortSignal;
+}
+
+/**
+ * Who the workspace is currently acting as.
+ *
+ * Module-level rather than passed through every call because it is ambient by
+ * nature: one Digital Twin is selected at a time, and every user-scoped
+ * request is made as them. `TwinProvider` is the only writer — it sets this
+ * whenever the selection changes — and `request` reads it when a caller did
+ * not name somebody explicitly.
+ *
+ * This is identity, not authentication. The backend trusts the header exactly
+ * as sent, so this holds a convenience, not a credential.
+ */
+let activeUserId: string | null = null;
+
+/** Set by `TwinProvider`. Null while no twin is selected, or none exists. */
+export function setActiveUserId(userId: string | null): void {
+  activeUserId = userId;
+}
+
+export function getActiveUserId(): string | null {
+  return activeUserId;
 }
 
 export function buildUrl(
@@ -110,6 +148,18 @@ function headersFor(userId: string | null | undefined, json: boolean): Headers {
   return headers;
 }
 
+/**
+ * The identity a request should carry.
+ *
+ * `undefined` means "nobody said", which is the ordinary case for a
+ * user-scoped call and resolves to the selected twin. An explicit `null` is a
+ * decision to send none, and is honoured — that is what keeps the shared
+ * corpus endpoints identity-free even while a twin is selected.
+ */
+function identityFor(userId: string | null | undefined): string | null {
+  return userId !== undefined ? userId : activeUserId;
+}
+
 export async function request<T>(
   path: string,
   options: RequestOptions = {},
@@ -118,7 +168,7 @@ export async function request<T>(
 
   const response = await fetch(buildUrl(path, query), {
     method,
-    headers: headersFor(userId, body !== undefined),
+    headers: headersFor(identityFor(userId), body !== undefined),
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
   });
@@ -128,6 +178,36 @@ export async function request<T>(
   if (response.status === 204) return undefined as T;
 
   return (await response.json()) as T;
+}
+
+/**
+ * A GET that returns a file rather than JSON.
+ *
+ * Fetched rather than linked. A plain `<a href>` download cannot carry the
+ * identity header, which would mean putting the user id in the query string —
+ * an identity in a URL is one that ends up in every access log and browser
+ * history, and this endpoint returns somebody's private report.
+ *
+ * Returns the bytes and the filename the server chose, so the caller does not
+ * invent one.
+ */
+export async function download(
+  path: string,
+  options: RequestOptions = {},
+): Promise<{ blob: Blob; filename: string | null }> {
+  const { userId, query, signal } = options;
+
+  const response = await fetch(buildUrl(path, query), {
+    headers: headersFor(identityFor(userId), false),
+    signal,
+  });
+
+  if (!response.ok) throw await toApiError(response);
+
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const match = /filename=("?)([^";]+)\1/.exec(disposition);
+
+  return { blob: await response.blob(), filename: match?.[2] ?? null };
 }
 
 /**
@@ -141,7 +221,8 @@ export async function upload<T>(
   options: { userId?: string | null; signal?: AbortSignal } = {},
 ): Promise<T> {
   const headers = new Headers();
-  if (options.userId) headers.set("X-User-ID", options.userId);
+  const identity = identityFor(options.userId);
+  if (identity) headers.set("X-User-ID", identity);
 
   const response = await fetch(buildUrl(path), {
     method: "POST",

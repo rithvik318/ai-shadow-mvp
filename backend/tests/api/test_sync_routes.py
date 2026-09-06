@@ -294,3 +294,185 @@ def test_no_credential_is_ever_in_a_sync_response(
     body = client.get(STATUS_ENDPOINT).text
 
     assert "s3cr3t" not in body
+
+
+# --- the aggregate a status screen needs ---------------------------------
+
+
+def _configure(monkeypatch: pytest.MonkeyPatch, *entries: dict) -> None:
+    from app.config import settings as settings_module
+
+    monkeypatch.setattr(
+        settings_module.settings, "ONEDRIVE_SOURCES", sources_json(*entries)
+    )
+
+
+def test_a_configured_source_appears_before_it_has_ever_run(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The state of every source on the day it is configured. Listing only
+    sources with stored state would show an empty table and read as "OneDrive
+    is not set up" to the person who has just set it up."""
+
+    _configure(monkeypatch, {"key": "capabilities", "path": "C", "drive_id": DRIVE_ID})
+
+    source = client.get(STATUS_ENDPOINT).json()["sources"][0]
+
+    assert source["source_key"] == "capabilities"
+    assert source["status"] == "never_run"
+    assert source["has_delta_token"] is False
+    assert source["last_succeeded_at"] is None
+
+
+def test_all_five_sources_are_listed_in_configured_order(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure(
+        monkeypatch,
+        {
+            "key": "cftc-dq-da",
+            "label": "CFTC / DQ-DA",
+            "path": "a",
+            "drive_id": DRIVE_ID,
+        },
+        {
+            "key": "amtrack",
+            "label": "Amtrack / AWS Migration",
+            "path": "b",
+            "drive_id": DRIVE_ID,
+        },
+        {"key": "case-study", "label": "Case Study", "path": "c", "drive_id": DRIVE_ID},
+        {
+            "key": "freddie-mac-2026",
+            "label": "Freddie Mac 2026",
+            "path": "d",
+            "drive_id": DRIVE_ID,
+        },
+        {
+            "key": "capabilities",
+            "label": "Capabilities",
+            "path": "e",
+            "drive_id": DRIVE_ID,
+        },
+    )
+
+    body = client.get(STATUS_ENDPOINT).json()
+
+    assert [source["label"] for source in body["sources"]] == [
+        "CFTC / DQ-DA",
+        "Amtrack / AWS Migration",
+        "Case Study",
+        "Freddie Mac 2026",
+        "Capabilities",
+    ]
+
+
+def test_a_disabled_source_is_shown_as_configured_but_off(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hiding it would read as a configuration mistake rather than a choice."""
+
+    _configure(
+        monkeypatch,
+        {"key": "off", "path": "C", "drive_id": DRIVE_ID, "enabled": False},
+    )
+
+    source = client.get(STATUS_ENDPOINT).json()["sources"][0]
+
+    assert source["enabled"] is False
+    assert source["configured"] is True
+
+
+def test_the_configured_path_and_link_are_reported(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure(
+        monkeypatch,
+        {
+            "key": "capabilities",
+            "path": "Documents/Capabilities",
+            "drive_id": DRIVE_ID,
+            "uri": "https://example.sharepoint.com/Capabilities",
+        },
+    )
+
+    source = client.get(STATUS_ENDPOINT).json()["sources"][0]
+
+    assert source["path"] == "Documents/Capabilities"
+    assert source["uri"] == "https://example.sharepoint.com/Capabilities"
+
+
+def test_a_source_removed_from_configuration_is_still_reported(
+    client: TestClient, db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its documents are still in the knowledge base. Dropping the row would
+    make them look like they came from nowhere."""
+
+    from app.models.sync import OneDriveSyncState
+
+    db_session.add(OneDriveSyncState(source_key="retired", status=SyncStatus.SUCCEEDED))
+    db_session.commit()
+
+    _configure(monkeypatch, {"key": "current", "path": "C", "drive_id": DRIVE_ID})
+
+    by_key = {
+        source["source_key"]: source
+        for source in client.get(STATUS_ENDPOINT).json()["sources"]
+    }
+
+    assert by_key["current"]["configured"] is True
+    assert by_key["retired"]["configured"] is False
+
+
+def test_discovered_is_derived_from_the_outcome_counts(
+    client: TestClient, db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Derived rather than stored, so it cannot drift out of agreement with
+    the numbers underneath it."""
+
+    from app.models.sync import OneDriveSyncState
+
+    db_session.add(
+        OneDriveSyncState(
+            source_key="capabilities",
+            status=SyncStatus.PARTIAL,
+            last_indexed=3,
+            last_replaced=1,
+            last_unchanged=10,
+            last_deleted=2,
+            last_unsupported=4,
+            last_failed=1,
+        )
+    )
+    db_session.commit()
+
+    _configure(monkeypatch, {"key": "capabilities", "path": "C", "drive_id": DRIVE_ID})
+
+    source = client.get(STATUS_ENDPOINT).json()["sources"][0]
+
+    assert source["last_discovered"] == 21
+
+
+def test_a_broken_configuration_says_why(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Not configured" and "configured wrongly" look identical from a status
+    screen unless one of them explains itself."""
+
+    from app.config import settings as settings_module
+
+    monkeypatch.setattr(settings_module.settings, "ONEDRIVE_SOURCES", "{not json")
+
+    body = client.get(STATUS_ENDPOINT).json()
+
+    assert body["configured"] is False
+    assert body["configuration_error"]
+    assert body["sources"] == []
+
+
+def test_a_healthy_configuration_reports_no_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure(monkeypatch, {"key": "capabilities", "path": "C", "drive_id": DRIVE_ID})
+
+    assert client.get(STATUS_ENDPOINT).json()["configuration_error"] is None

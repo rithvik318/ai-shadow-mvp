@@ -85,7 +85,7 @@ def test_the_stored_row_carries_headers_and_not_the_body(
     )
 
     assert assessment.subject == "Proposal follow-up"
-    assert assessment.sender == "client@example.com"
+    assert assessment.sender_address == "client@example.com"
     assert not hasattr(assessment, "body")
     assert "acquisition" not in (assessment.summary or "")
 

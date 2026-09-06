@@ -750,3 +750,282 @@ def test_a_busy_source_does_not_stop_the_others(
     assert by_key["one"].mode == "skipped"
     assert by_key["one"].error
     assert by_key["two"].status is SyncStatus.SUCCEEDED
+
+
+# --- enabled and disabled sources ----------------------------------------
+
+
+def _configure(monkeypatch: pytest.MonkeyPatch, *entries: dict) -> None:
+    from app.config import settings as settings_module
+
+    monkeypatch.setattr(
+        settings_module.settings, "ONEDRIVE_SOURCES", sources_json(*entries)
+    )
+
+
+def test_a_disabled_source_is_not_synchronised(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure(
+        monkeypatch,
+        {"key": "on", "path": "One", "drive_id": DRIVE_ID},
+        {"key": "off", "path": "Two", "drive_id": DRIVE_ID, "enabled": False},
+    )
+
+    summaries = sync_all(db_session, client=_client([([], "delta:a")]))
+
+    assert [summary.source_key for summary in summaries] == ["on"]
+    # No state row either: a source that has never run has nothing to record.
+    assert get_state(db_session, "off") is None
+
+
+def test_disabling_a_source_keeps_its_delta_token(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disabling is a pause, not a deletion. Re-enabling must resume rather
+    than re-download and re-embed the whole folder."""
+
+    _configure(monkeypatch, {"key": "off", "path": "Two", "drive_id": DRIVE_ID})
+    sync_all(db_session, client=_client([([], "delta:kept")]))
+
+    _configure(
+        monkeypatch,
+        {"key": "off", "path": "Two", "drive_id": DRIVE_ID, "enabled": False},
+    )
+    # With the only source disabled there is nothing to run, which is the same
+    # state as an unconfigured deployment.
+    with pytest.raises(SyncNotConfiguredError):
+        sync_all(db_session, client=_client([([], "delta:ignored")]))
+
+    state = get_state(db_session, "off")
+
+    assert state is not None
+    assert state.delta_link == "delta:kept"
+
+
+def test_naming_a_disabled_source_is_refused_rather_than_obeyed(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Syncing it anyway would contradict the configuration the deployment is
+    running, which is a surprise rather than an override."""
+
+    _configure(
+        monkeypatch,
+        {"key": "off", "path": "Two", "drive_id": DRIVE_ID, "enabled": False},
+    )
+
+    with pytest.raises(SyncNotConfiguredError) as error:
+        sync_all(db_session, client=_client([]), source_key="off")
+
+    assert "off" in str(error.value)
+
+
+def test_every_source_being_disabled_reads_as_nothing_configured(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure(
+        monkeypatch,
+        {"key": "off", "path": "Two", "drive_id": DRIVE_ID, "enabled": False},
+    )
+
+    with pytest.raises(SyncNotConfiguredError):
+        sync_all(db_session, client=_client([]))
+
+
+# --- isolation from the unexpected ---------------------------------------
+
+
+class _Exploding:
+    """A client that fails in a way nobody wrote a handler for."""
+
+    def get(self, *_args, **_kwargs) -> dict:
+        raise RuntimeError("socket exploded")
+
+    def delta(self, *_args, **_kwargs):  # pragma: no cover - never reached
+        raise RuntimeError("socket exploded")
+
+    def paged(self, *_args, **_kwargs):  # pragma: no cover - never reached
+        raise RuntimeError("socket exploded")
+
+    def download(self, *_args, **_kwargs):  # pragma: no cover - never reached
+        raise RuntimeError("socket exploded")
+
+
+def test_an_unexpected_failure_does_not_leave_a_source_stuck_running(
+    db_session: Session,
+) -> None:
+    """The row is marked `running` before Graph is contacted. If an unforeseen
+    error escaped, that flag would block every future run of this source for
+    six hours — over a bug, not over a real concurrent run."""
+
+    summary = sync_source(db_session, _Exploding(), SOURCE)  # type: ignore[arg-type]
+
+    assert summary.status is SyncStatus.FAILED
+
+    state = get_state(db_session, SOURCE.key)
+
+    assert state is not None
+    assert state.status is SyncStatus.FAILED
+
+
+def test_an_unexpected_failure_is_reported_without_its_internals(
+    db_session: Session,
+) -> None:
+    """Stack traces and driver messages are for the log, not for a response."""
+
+    summary = sync_source(db_session, _Exploding(), SOURCE)  # type: ignore[arg-type]
+
+    assert "socket" not in (summary.error or "")
+    assert "RuntimeError" in (summary.error or "")
+
+
+def test_one_source_exploding_does_not_stop_the_others(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure(
+        monkeypatch,
+        {"key": "broken", "path": "One", "drive_id": DRIVE_ID},
+        {"key": "fine", "path": "Two", "drive_id": DRIVE_ID},
+    )
+
+    working = _client([([], "delta:a")])
+
+    class _BrokenOnce:
+        """Fails for the first source and behaves for the second."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("socket exploded")
+            return working.get(*args, **kwargs)
+
+        def delta(self, *args, **kwargs):
+            return working.delta(*args, **kwargs)
+
+        def paged(self, *args, **kwargs):
+            return working.paged(*args, **kwargs)
+
+        def download(self, *args, **kwargs):
+            return working.download(*args, **kwargs)
+
+    summaries = sync_all(db_session, client=_BrokenOnce())  # type: ignore[arg-type]
+    by_key = {summary.source_key: summary for summary in summaries}
+
+    assert by_key["broken"].status is SyncStatus.FAILED
+    assert by_key["fine"].status is SyncStatus.SUCCEEDED
+
+
+def test_a_file_reached_by_two_sources_is_one_document(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`Case Study` sits inside `Capabilities`, so the two configured folders
+    overlap. Identity is the Graph item, not the folder that found it, so the
+    second source sees an already-indexed file rather than making a copy."""
+
+    _configure(
+        monkeypatch,
+        {"key": "capabilities", "path": "Capabilities", "drive_id": DRIVE_ID},
+        {"key": "case-study", "path": "Capabilities/Case Study", "drive_id": DRIVE_ID},
+    )
+
+    client = _client([])
+    shared = _with_content(client, _file("shared-1", "study.txt"), "A shared study.")
+    client.delta_pages = [([shared], "delta:a"), ([shared], "delta:b")]
+
+    summaries = sync_all(db_session, client=client)
+    by_key = {summary.source_key: summary for summary in summaries}
+
+    assert by_key["capabilities"].indexed == 1
+    assert by_key["case-study"].unchanged == 1
+    assert len(_documents(db_session)) == 1
+
+
+# --- sources named by a sharing link -------------------------------------
+
+
+def test_a_share_linked_source_syncs_without_being_pinned_first(
+    db_session: Session,
+) -> None:
+    """A folder shared from elsewhere has a drive id nobody has written down.
+
+    Resolution runs on the sync path, so configuring the link is enough: no
+    separate pinning step stands between a configured source and its first
+    run.
+    """
+
+    source = OneDriveSource(
+        key="capabilities",
+        label="Capabilities",
+        share_url="https://contoso.sharepoint.com/:f:/s/KB/AbC",
+    )
+
+    client = _client([])
+    client.shared = {
+        "id": "shared-1",
+        "name": "Capabilities",
+        "folder": {"childCount": 1},
+        "parentReference": {"driveId": "library-drive-1"},
+    }
+    item = _with_content(client, _file("i1", "a.txt"), "A shared document.")
+    client.delta_pages = [([item], "delta:1")]
+
+    summary = sync_source(db_session, client, source)
+
+    assert summary.status is SyncStatus.SUCCEEDED
+    assert summary.indexed == 1
+
+
+def test_the_drive_graph_named_is_what_gets_remembered(db_session: Session) -> None:
+    """The shared folder's real drive, not the one anybody configured."""
+
+    source = OneDriveSource(
+        key="capabilities",
+        label="Capabilities",
+        share_url="https://contoso.sharepoint.com/:f:/s/KB/AbC",
+    )
+
+    client = _client([([], "delta:1")])
+    client.shared = {
+        "id": "shared-1",
+        "name": "Capabilities",
+        "folder": {},
+        "parentReference": {"driveId": "library-drive-1"},
+    }
+
+    sync_source(db_session, client, source)
+
+    state = get_state(db_session, "capabilities")
+
+    assert state is not None
+    assert (state.drive_id, state.item_id) == ("library-drive-1", "shared-1")
+
+
+def test_a_source_that_cannot_be_resolved_says_what_would_fix_it(
+    db_session: Session,
+) -> None:
+    """The message a person reads when a sync fails has to carry the remedy.
+
+    "Access denied" alone sends somebody granting permissions; naming the
+    reason is what stops that.
+    """
+
+    source = OneDriveSource(
+        key="consumer",
+        label="Consumer folder",
+        share_url="https://onedrive.live.com/?id=root&cid=ABC",
+    )
+
+    summary = sync_source(db_session, _client([]), source)
+
+    assert summary.status is SyncStatus.FAILED
+    assert "personal Microsoft account" in (summary.error or "")
+    assert "copied or moved" in (summary.error or "")
+
+    state = get_state(db_session, "consumer")
+
+    assert state is not None
+    # Released rather than left claiming to be running.
+    assert state.status is SyncStatus.FAILED

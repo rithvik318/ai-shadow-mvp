@@ -26,6 +26,29 @@ class DocumentResponse(BaseModel):
     updated_at: datetime
 
 
+class CorpusStatsResponse(BaseModel):
+    """How much is in the knowledge base, counted rather than sampled.
+
+    Exists because the alternative was a client counting a page of documents
+    and calling the result a corpus total. Every other fact a status screen
+    needs — which folders are configured, when each last synchronised, what
+    failed — is already answered by `GET /sync/onedrive/status`, so this adds
+    only the counts nothing else could supply.
+    """
+
+    documents: int = Field(description="Documents in the shared knowledge base.")
+    chunks: int = Field(description="Retrievable passages across every document.")
+    embedded_chunks: int = Field(
+        description=(
+            "Passages that carry an embedding. Anything short of `chunks` is "
+            "indexed but not yet searchable."
+        )
+    )
+    by_status: dict[DocumentStatus, int] = Field(
+        description="Document count per ingestion status, including zeroes."
+    )
+
+
 class DocumentListResponse(BaseModel):
     """One page of documents, with enough context to request the next."""
 

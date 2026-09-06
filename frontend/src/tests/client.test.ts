@@ -9,7 +9,14 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { ApiError, buildUrl, request, toApiError } from "../api/client.ts";
+import {
+  ApiError,
+  buildUrl,
+  getActiveUserId,
+  request,
+  setActiveUserId,
+  toApiError,
+} from "../api/client.ts";
 import * as api from "../api/index.ts";
 
 interface Call {
@@ -42,6 +49,7 @@ function stubFetch(response: { status?: number; body?: unknown } = {}): void {
 
 afterEach(() => {
   globalThis.fetch = realFetch;
+  setActiveUserId(null);
   calls.length = 0;
 });
 
@@ -274,14 +282,38 @@ describe("the email client", () => {
     }
   });
 
-  it("sends no identity for the provider status", async () => {
-    // A setup notice has to render before anybody has chosen a twin.
+  it("reads back the twin the workspace is acting as", () => {
+    // The getter is what anything outside `TwinProvider` uses to answer "who
+    // are we acting as right now" without reaching into React state.
+    setActiveUserId("twin-9");
+    assert.equal(getActiveUserId(), "twin-9");
+
+    setActiveUserId(null);
+    assert.equal(getActiveUserId(), null);
+  });
+
+  it("scopes the provider status to the selected twin", async () => {
+    // The mailbox is per-user, so this endpoint is user-scoped and the
+    // backend answers 401 without an identity. It takes no `userId`
+    // parameter, so it picks up the selected twin from the client.
+    setActiveUserId("twin-9");
     stubFetch({ body: { provider: null, configured: false, connected: false } });
 
     await api.getEmailProviderStatus();
 
     assert.equal(calls[0].url, "/api/email/provider/status");
-    assert.equal(calls[0].headers.get("X-User-ID"), null);
+    assert.equal(calls[0].headers.get("X-User-ID"), "twin-9");
+  });
+
+  it("sends no identity for the provider status before a twin is chosen", async () => {
+    // A setup notice has to be able to render before anybody has chosen one,
+    // and an empty header is better than a fabricated id.
+    setActiveUserId(null);
+    stubFetch({ body: { provider: null, configured: false, connected: false } });
+
+    await api.getEmailProviderStatus();
+
+    assert.equal(calls[0].headers.has("X-User-ID"), false);
   });
 
   it("always confirms explicitly when sending", async () => {
@@ -316,5 +348,141 @@ describe("the email client", () => {
 
     assert.equal(calls[0].url, "/api/email/templates/t1/fill");
     assert.deepEqual(JSON.parse(String(calls[0].body)), { values: { name: "Ana" } });
+  });
+});
+
+describe("tasks, events and the weekly report", () => {
+  it("scopes the weekly report to the calling twin", () => {
+    stubFetch({ body: { upcoming: [] } });
+    void api.getWeeklyReport("user-1");
+
+    assert.ok(calls[0].url.endsWith("/reports/weekly"));
+    assert.equal(calls[0].headers.get("X-User-ID"), "user-1");
+  });
+
+  it("sends the twin's identity on every task write", () => {
+    stubFetch({ body: {} });
+    void api.completeTask("user-1", "task-9");
+
+    assert.ok(calls[0].url.endsWith("/tasks/task-9/complete"));
+    assert.equal(calls[0].method, "POST");
+    assert.equal(calls[0].headers.get("X-User-ID"), "user-1");
+  });
+
+  it("starts a task by moving it to in_progress", () => {
+    stubFetch({ body: {} });
+    void api.updateTask("user-1", "task-9", { status: "in_progress" });
+
+    assert.equal(calls[0].method, "PATCH");
+    assert.deepEqual(JSON.parse(String(calls[0].body)), { status: "in_progress" });
+  });
+
+  it("records attendance through its own endpoint", () => {
+    // Recording that somebody went to a meeting is a different act from
+    // editing it, and the API keeps them apart.
+    stubFetch({ body: {} });
+    void api.markAttendance("user-1", "event-2", "attended");
+
+    assert.ok(calls[0].url.endsWith("/events/event-2/attendance"));
+    assert.deepEqual(JSON.parse(String(calls[0].body)), {
+      status: "attended",
+      note: null,
+    });
+  });
+
+  it("can withdraw an attendance answer", () => {
+    stubFetch({ body: {} });
+    void api.markAttendance("user-1", "event-2", "unknown");
+
+    assert.equal(JSON.parse(String(calls[0].body)).status, "unknown");
+  });
+
+  it("scopes an event listing to the twin", () => {
+    stubFetch({ body: { items: [], total: 0 } });
+    void api.listEvents("user-1");
+
+    assert.equal(calls[0].headers.get("X-User-ID"), "user-1");
+  });
+});
+
+describe("user deletion", () => {
+  it("previews before it deletes", () => {
+    stubFetch({ body: { owned: {} } });
+    void api.previewUserDeletion("admin-1", "user-2");
+
+    assert.ok(calls[0].url.endsWith("/users/user-2/deletion-preview"));
+    assert.equal(calls[0].method, "GET");
+  });
+
+  it("names the target in the path and the actor in the header", () => {
+    // An administrator acting *on* somebody else is the one place a user id
+    // legitimately travels in a URL, and the two identities are different.
+    stubFetch({ body: {} });
+    void api.deleteUser("admin-1", "user-2");
+
+    assert.ok(calls[0].url.endsWith("/users/user-2"));
+    assert.equal(calls[0].method, "DELETE");
+    assert.equal(calls[0].headers.get("X-User-ID"), "admin-1");
+  });
+});
+
+describe("switching users", () => {
+  it("attributes every later request to the person now selected", async () => {
+    // The whole of user switching, at the layer where it is decided. Panels
+    // that refetch are only correct if the refetch carries the new identity;
+    // if this were captured once, every screen would keep asking as the person
+    // who happened to be selected when the module loaded.
+    const seen: Array<string | null> = [];
+
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_input: unknown, init: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      seen.push(headers.get("X-User-ID"));
+
+      return new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      setActiveUserId("sudha");
+      await request("/tasks");
+
+      setActiveUserId("robert");
+      await request("/tasks");
+
+      assert.deepEqual(seen, ["sudha", "robert"]);
+    } finally {
+      globalThis.fetch = original;
+      setActiveUserId(null);
+    }
+  });
+
+  it("lets a caller name the user rather than relying on who is selected", async () => {
+    // What the provider-status call now does. A request that states whose
+    // answer it wants cannot be misattributed by a switch that happens while
+    // it is in flight.
+    let sent: string | null = null;
+
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_input: unknown, init: RequestInit) => {
+      sent = new Headers(init?.headers).get("X-User-ID");
+
+      return new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      setActiveUserId("sudha");
+      await request("/email/provider/status", { userId: "robert" });
+
+      assert.equal(sent, "robert");
+    } finally {
+      globalThis.fetch = original;
+      setActiveUserId(null);
+    }
   });
 });

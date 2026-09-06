@@ -13,7 +13,15 @@ them now rather than after the email and task workflows are built on top.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, UniqueConstraint, Uuid, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    String,
+    UniqueConstraint,
+    Uuid,
+    false,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
@@ -32,9 +40,18 @@ class User(Base):
     # person creating them.
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     # A plain string, deliberately. A role table would be the first half of an
-    # RBAC system nobody has asked for; today this labels the persona and
-    # nothing branches on it.
+    # RBAC system nobody has asked for; this labels the *persona* the Digital
+    # Twin writes as — "CEO", "CRM Manager" — and nothing branches on it.
     role: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Authorisation, kept strictly apart from the persona above. `role` is
+    # typed by a person and describes how they write; this is a fact the server
+    # checks before allowing the one operation that is not self-service —
+    # deleting another user. Reading `role == "Admin"` as permission would make
+    # anybody who types that word an administrator.
+    is_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

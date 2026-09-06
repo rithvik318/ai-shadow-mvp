@@ -218,7 +218,10 @@ def assess_message(
     values = {
         "provider_thread_id": message.thread_id,
         "subject": message.subject or None,
-        "sender": str(message.sender) if message.sender else None,
+        # Structure preserved, not flattened. `sender_address` is what a
+        # follow-up is addressed to; `sender_name` is only ever displayed.
+        "sender_name": message.sender.name if message.sender else None,
+        "sender_address": message.sender.address if message.sender else None,
         "received_at": message.received_at,
         "category": verdict.category,
         "priority": verdict.priority,

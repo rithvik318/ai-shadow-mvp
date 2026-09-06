@@ -289,3 +289,67 @@ def test_health_endpoint(client: TestClient) -> None:
 
 def test_root_endpoint_reports_the_service(client: TestClient) -> None:
     assert client.get("/").json()["status"] == "running"
+
+
+# --- GET /documents/stats ------------------------------------------------
+
+
+def test_stats_are_zero_on_an_empty_corpus(client: TestClient) -> None:
+    body = client.get("/documents/stats").json()
+
+    assert body["documents"] == 0
+    assert body["chunks"] == 0
+    # Every status appears, so a client never has to guess whether a missing
+    # key means zero or means the server does not track it.
+    assert body["by_status"]["indexed"] == 0
+    assert body["by_status"]["failed"] == 0
+
+
+def test_stats_count_the_whole_corpus_not_a_page(client: TestClient) -> None:
+    """The reason this endpoint exists. A status screen was counting the page
+    of documents a listing returned and calling the result a corpus total,
+    which is wrong the moment the corpus outgrows one page."""
+
+    for index in range(3):
+        _upload(
+            client,
+            build_markdown([(f"Doc {index}", "Some indexable prose about turbines.")]),
+            f"doc-{index}.md",
+            "text/markdown",
+        )
+
+    body = client.get("/documents/stats").json()
+
+    assert body["documents"] == 3
+    assert body["by_status"]["indexed"] == 3
+    assert body["chunks"] > 0
+
+
+def test_stats_report_passages_that_can_actually_be_retrieved(
+    client: TestClient, db_session: Session
+) -> None:
+    """A chunk with no embedding is indexed and unsearchable, which is a state
+    worth being able to see rather than one to average away."""
+
+    _upload(
+        client,
+        build_markdown([("Doc", "Some indexable prose about turbines.")]),
+        "doc.md",
+        "text/markdown",
+    )
+
+    chunk = db_session.execute(select(DocumentChunk)).scalars().first()
+    assert chunk is not None
+    chunk.embedding = None
+    db_session.commit()
+
+    body = client.get("/documents/stats").json()
+
+    assert body["chunks"] > body["embedded_chunks"]
+
+
+def test_stats_is_not_parsed_as_a_document_id(client: TestClient) -> None:
+    """Route order. Declared after `/{document_id}` this would be rejected as
+    a malformed UUID, and the failure would only appear at runtime."""
+
+    assert client.get("/documents/stats").status_code == 200

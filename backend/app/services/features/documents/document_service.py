@@ -6,13 +6,14 @@ rather than retrofitted.
 """
 
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.constants import MVP_USER_ID
 from app.core.exceptions import DocumentNotFoundError
-from app.models.document import Document, DocumentStatus
+from app.models.document import Document, DocumentChunk, DocumentStatus
 
 
 def list_documents(
@@ -110,3 +111,57 @@ def delete_document_by_source(
     db.commit()
 
     return True
+
+
+@dataclass(frozen=True)
+class CorpusStats:
+    """How much is in the knowledge base, counted in the database.
+
+    Counted rather than derived from a page of results. The knowledge base is
+    a corpus, not a list: any answer built from the fifty documents a listing
+    happened to return is wrong as soon as there are fifty-one, and a status
+    screen that quietly under-reports is worse than one that says nothing.
+    """
+
+    documents: int
+    chunks: int
+    by_status: dict[str, int]
+    embedded_chunks: int
+
+
+def corpus_stats(db: Session, *, user_id: str = MVP_USER_ID) -> CorpusStats:
+    """Aggregate counts over the whole corpus, in three queries."""
+
+    by_status = {status.value: 0 for status in DocumentStatus}
+
+    rows = db.execute(
+        select(Document.status, func.count())
+        .where(Document.user_id == user_id)
+        .group_by(Document.status)
+    ).all()
+
+    for status, count in rows:
+        # SQLAlchemy hands back the enum member; the key is its value so the
+        # mapping serialises without a second conversion.
+        by_status[status.value if hasattr(status, "value") else str(status)] = count
+
+    chunks = db.execute(
+        select(func.count())
+        .select_from(DocumentChunk)
+        .where(DocumentChunk.user_id == user_id)
+    ).scalar_one()
+
+    # An indexed document with unembedded chunks is retrievable by nothing, so
+    # the gap between these two numbers is worth being able to see.
+    embedded = db.execute(
+        select(func.count())
+        .select_from(DocumentChunk)
+        .where(DocumentChunk.user_id == user_id, DocumentChunk.embedding.is_not(None))
+    ).scalar_one()
+
+    return CorpusStats(
+        documents=sum(by_status.values()),
+        chunks=chunks,
+        by_status=by_status,
+        embedded_chunks=embedded,
+    )
