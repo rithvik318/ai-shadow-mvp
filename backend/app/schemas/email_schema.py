@@ -393,7 +393,12 @@ class AssessmentResponse(BaseModel):
     provider_message_id: str
     provider_thread_id: str | None
     subject: str | None
-    sender: str | None
+    # Three fields where there was one string. `sender_address` is the only
+    # one a reply may be addressed to; `sender_display` is for rendering and
+    # is derived, never stored, so the two can never drift apart.
+    sender_name: str | None
+    sender_address: str | None
+    sender_display: str | None
     received_at: datetime | None
     category: EmailCategory
     priority: EmailPriority
@@ -434,6 +439,9 @@ class MessageInput(BaseModel):
 
     message_id: str = Field(min_length=1, max_length=512)
     thread_id: str | None = Field(default=None, max_length=512)
+    # Accepts either a bare address or "Name <address>", because callers
+    # legitimately have both. It is parsed into its parts at the route rather
+    # than stored whole — see `services/features/email/address.py`.
     sender: str | None = Field(default=None, max_length=512)
     to_recipients: list[str] = Field(default_factory=list, max_length=MAX_RECIPIENTS)
     cc_recipients: list[str] = Field(default_factory=list, max_length=MAX_RECIPIENTS)
@@ -492,3 +500,37 @@ class HandledRequest(BaseModel):
     """Mark a follow-up dealt with, or put it back. Always a person's call."""
 
     handled: bool = True
+
+
+class MailboxResponse(BaseModel):
+    """Which mailbox this user's Email Agent acts on.
+
+    `connected` is false with everything else null when the person has not
+    connected one — a normal state, not an error, and the UI shows a setup
+    notice rather than an empty inbox that looks like no mail.
+
+    `shared_fallback` says the address came from the server's
+    EMAIL_MAILBOX_ADDRESS rather than from this person. It is surfaced because
+    a shared mailbox is a materially different thing to be looking at, and a
+    person deserves to know which one they have.
+    """
+
+    connected: bool
+    provider: str | None = None
+    address: str | None = None
+    display_name: str | None = None
+    shared_fallback: bool = False
+    detail: str | None = None
+
+
+class MailboxUpdateRequest(BaseModel):
+    """Connect or change the caller's mailbox.
+
+    There is deliberately no `user_id` field. Whose mailbox this is comes from
+    the authenticated identity, never from the body — a body-supplied user id
+    would be an open door onto everybody else's mail.
+    """
+
+    address: str = Field(min_length=3, max_length=320)
+    provider: str | None = Field(default=None, max_length=64)
+    display_name: str | None = Field(default=None, max_length=255)

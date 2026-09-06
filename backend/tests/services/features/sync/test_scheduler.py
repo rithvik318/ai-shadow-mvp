@@ -166,3 +166,95 @@ def test_a_tick_runs_an_incremental_sync_not_a_full_one() -> None:
         database_module.SessionLocal = original_session  # type: ignore[assignment]
 
     assert calls == [{}]
+
+
+# --- the application's own wiring ----------------------------------------
+
+
+class _RecordingScheduler:
+    """Stands in for the real one so lifespan can be exercised without a job."""
+
+    def __init__(self) -> None:
+        self.starts = 0
+        self.stops = 0
+
+    async def start(self) -> None:
+        self.starts += 1
+
+    async def stop(self) -> None:
+        self.stops += 1
+
+
+def test_the_schedule_is_off_unless_the_deployment_asks_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A background job that downloads a corpus must be an explicit choice,
+    not what happens when nobody set a variable."""
+
+    from fastapi.testclient import TestClient
+
+    from app import main
+    from app.config import settings as settings_module
+
+    recording = _RecordingScheduler()
+    monkeypatch.setattr(main, "scheduler", recording)
+    monkeypatch.setattr(settings_module.settings, "ONEDRIVE_SYNC_ENABLED", False)
+
+    with TestClient(main.app):
+        pass
+
+    assert recording.starts == 0
+    # Stopping something that never started is harmless, and doing it
+    # unconditionally is what makes shutdown correct after a failed start.
+    assert recording.stops == 1
+
+
+def test_enabling_the_schedule_starts_and_stops_it_with_the_application(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from app import main
+    from app.config import settings as settings_module
+
+    recording = _RecordingScheduler()
+    monkeypatch.setattr(main, "scheduler", recording)
+    monkeypatch.setattr(settings_module.settings, "ONEDRIVE_SYNC_ENABLED", True)
+
+    with TestClient(main.app):
+        assert recording.starts == 1
+
+    assert recording.stops == 1
+
+
+def test_only_one_scheduler_exists_for_the_process() -> None:
+    """Two would mean two timers over one delta token."""
+
+    from app import main
+
+    assert main.scheduler is main.scheduler
+    assert isinstance(main.scheduler, SyncScheduler)
+
+
+def test_an_unconfigured_deployment_does_not_log_a_tick_as_a_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The schedule on and no folders yet is a setup state, not a fault. An
+    exception every hour is how a log stops being read."""
+
+    import logging
+
+    from app import main
+    from app.core.exceptions import SyncNotConfiguredError
+    from app.services.features.sync import onedrive_sync_service
+
+    def refuse(*_args, **_kwargs):
+        raise SyncNotConfiguredError("No OneDrive sources are configured.")
+
+    monkeypatch.setattr(onedrive_sync_service, "sync_all", refuse)
+
+    with caplog.at_level(logging.WARNING):
+        main._run_scheduled_sync()
+
+    assert "scheduled_sync_skipped" in caplog.text
+    assert "Traceback" not in caplog.text

@@ -85,8 +85,35 @@ class SyncStateResponse(BaseModel):
     label: str | None
     drive_id: str | None
     item_id: str | None
+    path: str | None = Field(
+        default=None, description="The configured folder path, when addressed by path."
+    )
+    uri: str | None = Field(
+        default=None,
+        description=(
+            "The folder's human-facing address, as configured. Never a Graph "
+            "URL and never carries a token or a query string."
+        ),
+    )
+    enabled: bool = Field(
+        default=True, description="Whether this source takes part in a run."
+    )
+    configured: bool = Field(
+        default=True,
+        description=(
+            "False for a source that has sync state but is no longer in "
+            "ONEDRIVE_SOURCES — its documents stay indexed until removed."
+        ),
+    )
     status: SyncStatus
     has_delta_token: bool
+    last_discovered: int = Field(
+        default=0,
+        description=(
+            "Files the last run examined. Derived from the per-outcome counts "
+            "rather than stored, so it cannot disagree with them."
+        ),
+    )
     error_message: str | None
     last_attempted_at: datetime | None
     last_succeeded_at: datetime | None
@@ -105,4 +132,12 @@ class SyncStatusResponse(BaseModel):
     configured: bool
     scheduled: bool
     interval_seconds: int | None
+    configuration_error: str | None = Field(
+        default=None,
+        description=(
+            "Why the configuration could not be read, when it could not be. "
+            "Shown so a typo in ONEDRIVE_SOURCES does not present as an empty "
+            "deployment."
+        ),
+    )
     sources: list[SyncStateResponse]

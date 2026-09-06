@@ -121,8 +121,10 @@ Microsoft Graph
 app/services/graph/          client.py       auth, paging, delta, downloads
    │                         drive_service.py  payloads → DriveItem
    ▼
-app/services/features/sync/  source_config.py  ONEDRIVE_SOURCES → sources
+app/services/features/sync/  source_config.py    ONEDRIVE_SOURCES → sources
+   │                         source_resolver.py  paths → drive_id + item_id
    │                         onedrive_sync_service.py
+   │                         scheduler.py        the timer, and nothing else
    ▼
 ingestion_service.ingest_file(source_uri=…, source_version=…)   §3
    ▼
@@ -148,6 +150,39 @@ either loses files or freezes.
 
 **Deletion is Graph's to declare.** A delta item carrying a `deleted` facet
 removes the document at that `source_uri`, and its chunks go by cascade.
+
+**No folder is named in code.** `ONEDRIVE_SOURCES` is the only place a folder
+appears, so a sixth source is an environment change. `source_config` parses it
+into `OneDriveSource` values — a stable `key`, a `label`, a `drive_id`, a
+`path` or an `item_id`, an optional human-facing `uri`, and an `enabled` flag
+that pauses a source without discarding the delta token stored against its key.
+
+**Resolution is separate from synchronisation.** `source_resolver` turns a
+configured path into the `drive_id` and `item_id` Graph answers to, by asking
+Graph. It never parses a URL: a sharing link contains something that looks like
+an id, and decoding one is how an integration ends up pointed confidently at
+the wrong folder. It is not on the sync path — `onedrive_sync_service` resolves
+lazily on first contact and stores what it got — but running it ahead of time,
+through `scripts/discover_onedrive_sources --resolve`, moves a misspelled path
+from a 3am failure to a configuration-time one.
+
+**Failure is scoped, at three levels.** One file's failure is that file's
+(`sync_one_file` never raises); one source's failure is that source's
+(`sync_all` records a summary and continues); and a source that fails before
+any work is done keeps its state exactly as it was, including its delta token.
+A source marked `running` is released on any outcome, so an unforeseen error
+cannot leave a folder blocked behind a flag nobody set deliberately.
+
+**The scheduler decides when, the service decides what.** `SyncScheduler` is
+given a plain callable and knows nothing about OneDrive, which is why it can be
+tested without a Graph and why the sync service can be tested without a timer.
+One instance exists per process, started and stopped by the FastAPI lifespan
+and only when `ONEDRIVE_SYNC_ENABLED` says so.
+
+**Status is composed, not duplicated.** `GET /sync/onedrive/status` owns the
+per-source facts; `GET /documents/stats` owns the corpus totals, counted in the
+database because a page of documents is a sample. Neither restates the other,
+and the Knowledge Base screen asks for both.
 
 ---
 

@@ -8,8 +8,14 @@ right and has no way to notice when it is not.
 import pytest
 
 from app.services.graph.client import GraphClient
-from app.services.graph.drive_service import iter_delta, iter_files, resolve_folder
-from tests.support.graph import DRIVE_ID, drive_item, graph_transport
+from app.services.graph.drive_service import (
+    iter_delta,
+    iter_files,
+    resolve_folder,
+    resolve_shared_item,
+    search_folder,
+)
+from tests.support.graph import DRIVE_ID, drive_item, graph_transport, shortcut_item
 
 
 def _client(routes, **kwargs) -> GraphClient:
@@ -228,3 +234,181 @@ def test_the_content_tag_is_preferred_as_the_version() -> None:
     changes, _link = iter_delta(_client(routes), drive_id=DRIVE_ID, item_id="root")
 
     assert changes[0].version == "ctag-value"
+
+
+# --- shortcuts to shared folders -----------------------------------------
+
+
+def test_a_shortcut_resolves_to_the_folder_it_points_at() -> None:
+    """ "Add shortcut to My files" leaves a stub in the person's own drive.
+
+    The stub has no children and no delta of its own, so a sync pointed at its
+    id finds an empty folder and reports success — a silent, complete failure.
+    """
+
+    routes = {
+        "/root/children": {
+            "value": [
+                shortcut_item(
+                    "stub-1",
+                    "Capabilities",
+                    target_item_id="real-1",
+                    target_drive_id="other-drive",
+                )
+            ]
+        },
+        "/items/real-1/children": {"value": []},
+    }
+
+    items = list(iter_files(_client(routes), drive_id=DRIVE_ID, item_id="root"))
+
+    # It is a folder in the other drive, so it is descended into, not yielded.
+    assert items == []
+
+
+def test_a_shortcut_carries_the_targets_drive_and_item() -> None:
+    routes = {
+        "root:/Capabilities:": shortcut_item(
+            "stub-1",
+            "Capabilities",
+            target_item_id="real-1",
+            target_drive_id="other-drive",
+        )
+    }
+
+    folder = resolve_folder(_client(routes), drive_id=DRIVE_ID, path="Capabilities")
+
+    assert folder.item_id == "real-1"
+    assert folder.drive_id == "other-drive"
+    assert folder.is_folder
+
+
+def test_a_shortcut_keeps_the_name_a_person_sees() -> None:
+    routes = {
+        "root:/Shared:": shortcut_item(
+            "stub-1", "Shared", target_item_id="real-1", target_drive_id="other-drive"
+        )
+    }
+
+    assert resolve_folder(_client(routes), drive_id=DRIVE_ID, path="Shared").name == (
+        "Shared"
+    )
+
+
+def test_a_shortcuts_identity_is_the_targets_not_the_stubs() -> None:
+    """Two people with shortcuts to one folder must not produce two documents
+    per file, and neither must be keyed to a stub that can be deleted."""
+
+    routes = {
+        "root:/Shared:": shortcut_item(
+            "stub-1",
+            "Shared",
+            target_item_id="real-1",
+            target_drive_id="other-drive",
+            folder=False,
+        )
+    }
+
+    item = resolve_folder(_client(routes), drive_id=DRIVE_ID, path="Shared")
+
+    assert item.source_uri == "onedrive:other-drive:real-1"
+
+
+def test_an_ordinary_item_is_unaffected_by_shortcut_handling() -> None:
+    routes = {"root:/Plain:": drive_item("plain-1", "Plain", folder=True)}
+
+    folder = resolve_folder(_client(routes), drive_id=DRIVE_ID, path="Plain")
+
+    assert folder.item_id == "plain-1"
+    assert folder.drive_id == DRIVE_ID
+
+
+# --- resolving a sharing link --------------------------------------------
+
+
+def test_a_sharing_link_resolves_to_a_drive_and_item_graph_supplied() -> None:
+    """The ids come out of Graph's response body. Nothing parses the URL."""
+
+    routes = {
+        "/shares/": {
+            "id": "shared-item-1",
+            "name": "Capabilities",
+            "folder": {"childCount": 9},
+            "parentReference": {"driveId": "library-drive-1"},
+            "cTag": "c1",
+        }
+    }
+
+    item = resolve_shared_item(
+        _client(routes), "https://contoso.sharepoint.com/:f:/s/KB/AbC"
+    )
+
+    assert item.item_id == "shared-item-1"
+    assert item.drive_id == "library-drive-1"
+    assert item.is_folder
+    assert item.source_uri == "onedrive:library-drive-1:shared-item-1"
+
+
+def test_a_shared_item_whose_drive_differs_from_the_configured_one_wins() -> None:
+    """A shared folder's drive is routinely not the drive anybody wrote down;
+    keeping the configured one would address the wrong library."""
+
+    routes = {
+        "/shares/": {
+            "id": "shared-1",
+            "name": "Case Study",
+            "folder": {},
+            "parentReference": {"driveId": "somebody-elses-drive"},
+        }
+    }
+
+    item = resolve_shared_item(
+        _client(routes), "https://contoso-my.sharepoint.com/:f:/g/personal/x/Ab"
+    )
+
+    assert item.drive_id == "somebody-elses-drive"
+
+
+def test_a_shared_link_that_resolves_to_a_shortcut_follows_it_too() -> None:
+    routes = {
+        "/shares/": shortcut_item(
+            "stub-1",
+            "Capabilities",
+            target_item_id="real-1",
+            target_drive_id="far-away",
+        )
+    }
+
+    item = resolve_shared_item(
+        _client(routes), "https://contoso.sharepoint.com/:f:/s/KB/AbC"
+    )
+
+    assert (item.drive_id, item.item_id) == ("far-away", "real-1")
+
+
+# --- searching a drive ---------------------------------------------------
+
+
+def test_a_folder_can_be_found_by_name_when_a_path_is_wrong() -> None:
+    """`itemNotFound` on a path means either the folder is absent or it is one
+    level deeper than somebody wrote down. Only a search tells them apart."""
+
+    routes = {
+        "/root/search": {
+            "value": [
+                drive_item("found-1", "Capabilities", folder=True),
+                drive_item("found-2", "Capabilities archive", folder=True),
+            ]
+        }
+    }
+
+    found = search_folder(_client(routes), drive_id=DRIVE_ID, query="Capabilities")
+
+    assert [item.name for item in found] == ["Capabilities", "Capabilities archive"]
+    assert found[0].item_id == "found-1"
+
+
+def test_a_quote_in_a_search_term_cannot_break_the_query() -> None:
+    routes = {"/root/search": {"value": []}}
+
+    assert search_folder(_client(routes), drive_id=DRIVE_ID, query="Bob's files") == []

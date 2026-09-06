@@ -194,23 +194,30 @@ class OutlookEmailProvider:
 
     @classmethod
     def from_settings(
-        cls, *, client: GraphClient | None = None
+        cls, *, mailbox: str | None = None, client: GraphClient | None = None
     ) -> "OutlookEmailProvider":
-        """Build from configuration, or say precisely what is missing.
+        """Build for a mailbox, or say precisely what is missing.
 
-        `EMAIL_MAILBOX_ADDRESS` is checked here rather than deferred to the
-        first call, because "which mailbox?" has no sensible default under
-        application permissions and discovering that at send time would be the
-        worst possible moment.
+        The mailbox is an argument first and a setting second. Under
+        application permissions there is no signed-in user, so every mail call
+        has to name a mailbox; which one is a question about a *person*, and
+        this layer has no user. The caller that does — the mailbox
+        configuration service — passes it in.
+
+        `EMAIL_MAILBOX_ADDRESS` remains as the fallback for single-user and
+        development deployments. It is checked here rather than deferred to the
+        first call, because discovering it at send time would be the worst
+        possible moment.
         """
 
-        mailbox = settings.EMAIL_MAILBOX_ADDRESS
+        address = (mailbox or "").strip() or settings.EMAIL_MAILBOX_ADDRESS
 
-        if not mailbox:
+        if not address:
             raise EmailProviderNotConfiguredError(
-                "The Outlook provider needs EMAIL_MAILBOX_ADDRESS — the address "
-                "of the mailbox to act on. Application permissions carry no "
-                "user, so every mail call has to name one."
+                "The Outlook provider needs a mailbox address — the mailbox to "
+                "act on. Application permissions carry no user, so every mail "
+                "call has to name one. Connect one with PUT /email/mailbox, or "
+                "set EMAIL_MAILBOX_ADDRESS for a single-user deployment."
             )
 
         if client is None:
@@ -227,7 +234,7 @@ class OutlookEmailProvider:
                     "synchronisation."
                 ) from exc
 
-        return cls(mailbox=mailbox, client=client)
+        return cls(mailbox=address, client=client)
 
     # --- reading ---------------------------------------------------------
 
@@ -296,7 +303,11 @@ class OutlookEmailProvider:
         payload = self._call(
             path,
             {
-                "$top": max(1, min(limit, 100)),
+                # Graph accepts up to a thousand; two hundred is this application's
+                # own ceiling, set in EMAIL_INBOX_MAX_PAGE_SIZE and repeated here
+                # because a provider must bound its own call rather than trust
+                # the caller to have done it.
+                "$top": max(1, min(limit, 200)),
                 "$select": _LIST_FIELDS,
                 "$orderby": "receivedDateTime desc",
             },

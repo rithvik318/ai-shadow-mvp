@@ -9,10 +9,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.config.settings import settings
 from app.core.exceptions import EmailSendError
 from app.models.email import EmailCategory, EmailPriority
 from app.models.user import User
-from app.services.features.email import mailbox_service, sending_service
+from app.services.features.email import (
+    mailbox_config_service,
+)
 from app.services.features.email.composer_service import GeneratedEmail
 from app.services.features.email.triage_service import ThreadSummary, TriageVerdict
 from tests.support.email import RecordingProvider, message
@@ -45,15 +48,22 @@ def no_mailbox(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _connect(monkeypatch: pytest.MonkeyPatch, provider: RecordingProvider) -> None:
-    """Point both service-level provider lookups at a test provider.
+    """Point every service-level mailbox lookup at a test provider.
 
-    Patched at the two modules that import `get_provider` by name, rather than
-    at the registry, so the test cannot accidentally pass because the registry
-    grew a fallback.
+    Patched at `mailbox_config_service`, which is the single seam both reading
+    and sending now resolve a mailbox through. Patching there rather than at
+    the registry keeps the property the original fixture was protecting: the
+    test cannot pass merely because the registry grew a fallback.
     """
 
-    monkeypatch.setattr(sending_service, "get_provider", lambda: provider)
-    monkeypatch.setattr(mailbox_service, "get_provider", lambda: provider)
+    monkeypatch.setattr(
+        mailbox_config_service, "provider_for", lambda db, *, user_id: provider
+    )
+    monkeypatch.setattr(
+        mailbox_config_service,
+        "status_of",
+        lambda db, *, user_id: provider.status(),
+    )
 
 
 # --- identity ------------------------------------------------------------
@@ -90,13 +100,30 @@ def test_every_scoped_endpoint_requires_an_identity(
     assert response.json()["error"] == "MissingIdentityError"
 
 
-def test_the_provider_status_needs_no_identity(client: TestClient) -> None:
-    """A setup notice must render before anybody has chosen a twin."""
+def test_the_provider_status_is_scoped_to_the_calling_user(
+    client: TestClient, user_headers: dict
+) -> None:
+    """The mailbox is a per-user fact, so its status is a per-user answer.
 
-    response = client.get("/email/provider/status")
+    This endpoint used to need no identity, because the mailbox was a property
+    of the deployment. It now reports whether *this* user has one — one person
+    being connected says nothing about another — so identity is required and a
+    user with no mailbox gets a truthful "not configured" rather than somebody
+    else's connection state.
+    """
+
+    response = client.get("/email/provider/status", headers=user_headers)
 
     assert response.status_code == 200
     assert response.json()["configured"] is False
+
+
+def test_the_provider_status_still_refuses_an_anonymous_caller(
+    client: TestClient,
+) -> None:
+    """Per-user status must not be readable without saying who you are."""
+
+    assert client.get("/email/provider/status").status_code == 401
 
 
 # --- templates -----------------------------------------------------------
@@ -745,3 +772,67 @@ def test_assessments_are_readable_while_the_mailbox_is_unreachable(
 
     assert body["total"] == 1
     assert body["items"][0]["provider_message_id"] == "m1"
+
+
+class TestInboxPageSize:
+    """How much of a mailbox one request returns.
+
+    Twenty-five was under a screenful for anyone with real correspondence, and
+    "Load more" on the second row of a list is not a page. Fifty is the default
+    now, raised through the API and the provider rather than by the frontend
+    slicing a smaller page — a frontend that asks for fifty and gets
+    twenty-five would show a Load more button that produces nothing.
+    """
+
+    def _provider(self, count: int) -> RecordingProvider:
+        return RecordingProvider(
+            messages=[message(message_id=f"m{index}") for index in range(count)]
+        )
+
+    def test_the_default_page_is_fifty(
+        self, client: TestClient, user_headers: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _connect(monkeypatch, self._provider(120))
+
+        body = client.get("/email/messages", headers=user_headers).json()
+
+        assert body["total"] == settings.EMAIL_INBOX_PAGE_SIZE == 50
+
+    def test_a_larger_page_can_be_asked_for(
+        self, client: TestClient, user_headers: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # What "Load more" does: re-ask for a bigger page, because the provider
+        # contract takes a count rather than a cursor.
+        _connect(monkeypatch, self._provider(300))
+
+        body = client.get(
+            "/email/messages", params={"limit": 150}, headers=user_headers
+        ).json()
+
+        assert body["total"] == 150
+
+    def test_one_request_cannot_become_a_mailbox_crawl(
+        self, client: TestClient, user_headers: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _connect(monkeypatch, self._provider(1000))
+
+        refused = client.get(
+            "/email/messages", params={"limit": 5000}, headers=user_headers
+        )
+
+        assert refused.status_code == 422
+
+    def test_the_deployment_ceiling_is_applied_not_merely_advertised(
+        self, client: TestClient, user_headers: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A request inside the query bound but above this deployment's ceiling
+        # gets the ceiling, not an error: too large a page is not a malformed
+        # request, it is one this deployment answers more modestly.
+        monkeypatch.setattr(settings, "EMAIL_INBOX_MAX_PAGE_SIZE", 60)
+        _connect(monkeypatch, self._provider(300))
+
+        body = client.get(
+            "/email/messages", params={"limit": 200}, headers=user_headers
+        ).json()
+
+        assert body["total"] == 60

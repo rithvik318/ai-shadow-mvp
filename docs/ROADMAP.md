@@ -49,6 +49,23 @@ folders, and the mailbox. Neither needs anything built — `GET
 /sync/onedrive/status` and `GET /email/provider/status` each report exactly what
 is missing, and both features work in their unconnected state.
 
+For OneDrive the remaining work is three commands on a machine that holds the
+tenant credentials, and none of them is a code change:
+
+1. `python -m scripts.discover_onedrive_sources --user <upn>` to get the drive id.
+2. `python -m scripts.discover_onedrive_sources --resolve` to turn the five
+   configured folder paths into `drive_id` + `item_id`, and paste the printed
+   `ONEDRIVE_SOURCES` line back into `.env`. It exits non-zero if any folder
+   could not be found, so a wrong path is caught before an embedding is paid for.
+3. `POST /sync/onedrive` with one source named, then with none, and read
+   `GET /sync/onedrive/status`.
+
+Everything downstream of that — delta handling, throttling, per-source failure
+isolation, the scheduler, the status screen and retrieval with attribution — is
+built and tested against a mock Graph. What is genuinely unknown until step 3
+runs is the shape of the real corpus: how many files, how many in formats the
+parser cannot read, and how hard the tenant throttles a first full enumeration.
+
 Then: authentication behind the `X-User-ID` identity that already exists, CI,
 background ingestion, and CORS or same-origin serving for a deployed frontend.
 
@@ -64,6 +81,8 @@ a completion, and is wrapped in the frontend API layer ready to be surfaced. The
 ## Then
 
 **Still to surface in the UI —** a retrieval-only search view over `POST /search`, and profile and memory editing over `PUT /profile` and the memory writes. Both are wrapped in the frontend's API layer; neither has a screen. The sync status now has one, inside the Knowledge Base panel.
+
+**Still to page properly —** the inbox. `EmailProvider.list_messages` takes a count and returns a list, so "load more" re-asks for a larger page rather than continuing from where the last one stopped. That is honest at fifty and a hundred and wasteful in the hundreds, which is why `EMAIL_INBOX_MAX_PAGE_SIZE` bounds it at two hundred. A real cursor is a change to the provider contract — every implementation would have to carry one — and is worth doing only when somebody has a mailbox large enough to need it.
 
 **Still to connect —** Gmail, if it is ever wanted. `EmailProvider` is the whole contract, and the work is one module beside `outlook_provider.py` plus one entry in the registry's `_BUILDERS`. Nothing above the provider boundary changes.
 

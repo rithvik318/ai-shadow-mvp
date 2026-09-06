@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import CurrentUser
+from app.config.settings import settings
 from app.core.exceptions import EmailValidationError
 from app.database.session import get_db
 from app.models.email import EmailAssessment, EmailCategory
@@ -16,6 +17,8 @@ from app.schemas.email_schema import (
     ComposeSource,
     HandledRequest,
     InboxResponse,
+    MailboxResponse,
+    MailboxUpdateRequest,
     MessageAddress,
     MessageAttachmentResponse,
     MessageInput,
@@ -30,9 +33,11 @@ from app.services.email.provider import registry
 from app.services.email.provider.base import EmailAddress, EmailMessage
 from app.services.features.email import (
     composer_service,
+    mailbox_config_service,
     mailbox_service,
     triage_service,
 )
+from app.services.features.email.address import parse_address
 
 router = APIRouter(prefix="/email", tags=["email"])
 
@@ -89,14 +94,125 @@ def _to_email_message(supplied: MessageInput) -> EmailMessage:
     return EmailMessage(
         message_id=supplied.message_id,
         thread_id=supplied.thread_id,
-        sender=(EmailAddress(address=supplied.sender) if supplied.sender else None),
-        to_recipients=[EmailAddress(address=item) for item in supplied.to_recipients],
-        cc_recipients=[EmailAddress(address=item) for item in supplied.cc_recipients],
+        # Parsed, not wrapped. A caller that sends "Robert Keenan <r@x.com>"
+        # here would otherwise have that whole string stored as an address.
+        sender=parse_address(supplied.sender),
+        to_recipients=[
+            item for item in map(parse_address, supplied.to_recipients) if item
+        ],
+        cc_recipients=[
+            item for item in map(parse_address, supplied.cc_recipients) if item
+        ],
         subject=supplied.subject,
         snippet=supplied.body[:255],
         body=supplied.body,
         received_at=supplied.received_at,
     )
+
+
+# --- mailbox -------------------------------------------------------------
+
+
+def _mailbox_response(db: Session, *, user_id: uuid.UUID) -> MailboxResponse:
+    """One shape for all three mailbox endpoints, so they cannot disagree."""
+
+    mailbox = mailbox_config_service.find_mailbox(db, user_id=user_id)
+
+    if mailbox is not None:
+        return MailboxResponse(
+            connected=True,
+            provider=mailbox.provider,
+            address=mailbox.address,
+            display_name=mailbox.display_name,
+            shared_fallback=False,
+        )
+
+    state = mailbox_config_service.status_of(db, user_id=user_id)
+
+    return MailboxResponse(
+        connected=state.configured and state.mailbox is not None,
+        provider=state.provider,
+        address=state.mailbox,
+        shared_fallback=state.mailbox is not None,
+        detail=state.detail,
+    )
+
+
+@router.get(
+    "/mailbox",
+    response_model=MailboxResponse,
+    summary="The mailbox this user's Email Agent acts on",
+)
+def get_mailbox(
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> MailboxResponse:
+    """Read the caller's own mailbox configuration, and nobody else's.
+
+    There is no route that reads another user's mailbox. The identity comes
+    from `CurrentUser`, and the lookup filters on it — so this endpoint has no
+    shape in which it could return somebody else's address.
+    """
+
+    return _mailbox_response(db, user_id=user.id)
+
+
+@router.put(
+    "/mailbox",
+    response_model=MailboxResponse,
+    summary="Connect or change this user's mailbox",
+    responses={
+        409: {"model": ErrorResponse, "description": "No provider is configured"},
+        422: {"model": ErrorResponse, "description": "The address is malformed"},
+    },
+)
+def put_mailbox(
+    request: MailboxUpdateRequest,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> MailboxResponse:
+    """Point this user's Email Agent at a mailbox.
+
+    Changing one person's mailbox changes nothing for anybody else: the row is
+    keyed by user and the write filters on the authenticated id.
+    """
+
+    mailbox = mailbox_config_service.set_mailbox(
+        db,
+        user_id=user.id,
+        address=request.address,
+        provider=request.provider,
+        display_name=request.display_name,
+    )
+
+    return MailboxResponse(
+        connected=True,
+        provider=mailbox.provider,
+        address=mailbox.address,
+        display_name=mailbox.display_name,
+        shared_fallback=False,
+    )
+
+
+@router.delete(
+    "/mailbox",
+    response_model=MailboxResponse,
+    summary="Disconnect this user's mailbox",
+)
+def delete_mailbox(
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> MailboxResponse:
+    """Forget this user's mailbox.
+
+    Idempotent: disconnecting when nothing is connected is a success, because
+    the state the caller asked for is the state they get. Nothing about the
+    mailbox itself is touched — this removes a pointer, not mail.
+    """
+
+    mailbox_config_service.disconnect_mailbox(db, user_id=user.id)
+
+    return _mailbox_response(db, user_id=user.id)
 
 
 # --- provider ------------------------------------------------------------
@@ -107,15 +223,21 @@ def _to_email_message(supplied: MessageInput) -> EmailMessage:
     response_model=ProviderStatusResponse,
     summary="Whether a mailbox is connected",
 )
-def provider_status() -> ProviderStatusResponse:
-    """Report the mailbox connection. Never fails, by design.
+def provider_status(
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> ProviderStatusResponse:
+    """Report *this user's* mailbox connection. Never fails, by design.
 
-    A deployment with no mailbox is a normal state, not an error: drafting,
+    A user with no mailbox is a normal state, not an error: drafting,
     rewriting, templates and saved drafts all work without one. This endpoint
     is what lets the UI say so plainly instead of showing invented mail.
+
+    Scoped to the caller rather than the deployment, because the mailbox is
+    now a per-user fact — one user being connected says nothing about another.
     """
 
-    state = registry.status()
+    state = mailbox_config_service.status_of(db, user_id=user.id)
 
     return ProviderStatusResponse(
         provider=state.provider,
@@ -217,7 +339,15 @@ def compose(
 def list_messages(
     user: CurrentUser,
     db: Session = Depends(get_db),
-    limit: int = Query(default=25, ge=1, le=100),
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        le=200,
+        description=(
+            "How many messages to return. Defaults to EMAIL_INBOX_PAGE_SIZE. "
+            "Bounded so one request cannot become a mailbox crawl."
+        ),
+    ),
     folder: str | None = Query(default=None),
 ) -> InboxResponse:
     """Real messages, newest first, each with this user's assessment if it has
@@ -232,8 +362,16 @@ def list_messages(
     inbox on sight — a null means "not yet judged", never "judged unimportant".
     """
 
+    # Bounded here as well as by the query constraint: the setting is the
+    # deployment's ceiling, and a client asking for more than it gets the
+    # ceiling rather than an error, because a too-large page is not a bad
+    # request — it is a request this deployment answers more modestly.
+    asked = limit or settings.EMAIL_INBOX_PAGE_SIZE
     triaged = mailbox_service.list_inbox(
-        db, user_id=user.id, limit=limit, folder=folder
+        db,
+        user_id=user.id,
+        limit=min(asked, settings.EMAIL_INBOX_MAX_PAGE_SIZE),
+        folder=folder,
     )
 
     return InboxResponse(
@@ -321,7 +459,7 @@ def triage(
     if request.message_id:
         item = mailbox_service.get_message(db, request.message_id, user_id=user.id)
         message = item.message
-        provider = registry.get_provider().name
+        provider = mailbox_config_service.provider_for(db, user_id=user.id).name
     else:
         message = _to_email_message(request.message)
         # Attributed to the configured provider where there is one, so a
@@ -367,7 +505,7 @@ def summarize_thread(
         )
 
     if request.thread_id:
-        messages = mailbox_service.get_thread(request.thread_id)
+        messages = mailbox_service.get_thread(db, request.thread_id, user_id=user.id)
     else:
         messages = [_to_email_message(item) for item in request.messages]
 

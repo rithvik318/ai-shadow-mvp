@@ -9,6 +9,7 @@ import {
 } from "react";
 
 import * as api from "../api";
+import { setActiveUserId } from "../api/client";
 import type { User } from "../api/types";
 
 /**
@@ -82,6 +83,14 @@ export function TwinProvider({ children }: { children: ReactNode }) {
     },
     [],
   );
+
+  // Published to the API client during render, not in an effect. React runs
+  // child effects *before* a parent's, so an effect here would land after the
+  // first request a child fires on mount — which is exactly how the Email
+  // Agent's provider-status call went out with no identity and came back 401.
+  // The assignment is idempotent and touches no React state, so repeating it
+  // on every render (including StrictMode's double render) costs nothing.
+  setActiveUserId(currentId);
 
   const value = useMemo<TwinContextValue>(
     () => ({

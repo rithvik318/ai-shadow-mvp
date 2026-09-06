@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState, type ChangeEvent } from "react";
 
 import * as api from "../../api";
 import { ApiError } from "../../api/client";
-import type { DocumentStatus, DocumentSummary } from "../../api/types";
+import type { CorpusStats, DocumentStatus, DocumentSummary } from "../../api/types";
 import { describeSource, formatBytes, formatDateTime } from "../../lib/format";
-import { filterDocuments, statsFor } from "../../lib/knowledge";
+import { filterDocuments } from "../../lib/knowledge";
 import { Badge, Button, EmptyState, ErrorNotice, Spinner } from "../ui";
 import { UploadTray } from "../chat/UploadTray";
 import { SyncPanel } from "./SyncPanel";
@@ -32,6 +32,7 @@ const FILTERS: Array<{ label: string; value: DocumentStatus | "all" }> = [
 export function KnowledgePanel({ reloadToken }: { reloadToken: number }) {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [total, setTotal] = useState(0);
+  const [stats, setStats] = useState<CorpusStats | null>(null);
   const [status, setStatus] = useState<DocumentStatus | "all">("all");
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
@@ -44,9 +45,16 @@ export function KnowledgePanel({ reloadToken }: { reloadToken: number }) {
     setError(null);
 
     try {
-      const page = await api.listDocuments({ limit: 200 });
+      // Two calls on purpose. The listing is a page of documents; the counts
+      // are the corpus. Deriving the second from the first is what made the
+      // totals wrong as soon as there were more documents than the page held.
+      const [page, corpus] = await Promise.all([
+        api.listDocuments({ limit: 200 }),
+        api.getCorpusStats(),
+      ]);
       setDocuments(page.items);
       setTotal(page.total);
+      setStats(corpus);
     } catch (cause) {
       setError(
         cause instanceof ApiError
@@ -72,6 +80,19 @@ export function KnowledgePanel({ reloadToken }: { reloadToken: number }) {
       await api.deleteDocument(document.id);
       setDocuments((current) => current.filter((item) => item.id !== document.id));
       setTotal((current) => Math.max(0, current - 1));
+      setStats((current) =>
+        current === null
+          ? current
+          : {
+              ...current,
+              documents: Math.max(0, current.documents - 1),
+              chunks: Math.max(0, current.chunks - document.chunk_count),
+              by_status: {
+                ...current.by_status,
+                [document.status]: Math.max(0, current.by_status[document.status] - 1),
+              },
+            },
+      );
     } catch (cause) {
       setError(
         cause instanceof ApiError ? cause.message : "Could not delete the document.",
@@ -81,7 +102,6 @@ export function KnowledgePanel({ reloadToken }: { reloadToken: number }) {
     }
   }
 
-  const stats = statsFor(documents, total);
   const visible = filterDocuments(documents, { query, status });
 
   return (
@@ -96,22 +116,31 @@ export function KnowledgePanel({ reloadToken }: { reloadToken: number }) {
 
       <div className="flex-1 overflow-y-auto px-6 py-5">
         <div className="space-y-6">
-          {/* Counts are derived from the documents actually loaded — the
-              backend exposes no aggregate endpoint, so nothing here is a
-              number the UI made up. */}
-          <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-5">
-            <Stat label="Documents" value={stats.total} />
-            <Stat label="Indexed" value={stats.byStatus.indexed} />
+          {/* Every number here is counted by the backend over the whole
+              corpus. Nothing is inferred from the page of documents below,
+              which is a sample and would under-report. */}
+          <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-6">
+            <Stat label="Documents" value={stats?.documents ?? 0} />
+            <Stat label="Passages" value={stats?.chunks ?? 0} />
+            <Stat label="Indexed" value={stats?.by_status.indexed ?? 0} />
             <Stat
               label="Processing"
-              value={stats.byStatus.processing + stats.byStatus.pending}
+              value={
+                (stats?.by_status.processing ?? 0) + (stats?.by_status.pending ?? 0)
+              }
             />
-            <Stat label="Unsupported" value={stats.byStatus.unsupported} />
-            <Stat label="Failed" value={stats.byStatus.failed} />
+            <Stat label="Unsupported" value={stats?.by_status.unsupported ?? 0} />
+            <Stat label="Failed" value={stats?.by_status.failed ?? 0} />
           </div>
-          {!stats.complete && !loading ? (
+          {stats && stats.chunks !== stats.embedded_chunks && !loading ? (
+            <p className="-mt-3 text-xs text-amber-700">
+              {stats.chunks - stats.embedded_chunks} passage(s) have no embedding and
+              cannot be retrieved yet.
+            </p>
+          ) : null}
+          {documents.length < total && !loading ? (
             <p className="-mt-3 text-xs text-ink-400">
-              Counts describe the {stats.loaded} most recent documents of {stats.total}.
+              Showing the {documents.length} most recent documents of {total}.
             </p>
           ) : null}
 

@@ -50,6 +50,9 @@ class UserResponse(BaseModel):
     name: str
     email: str
     role: str
+    # The persona label above is what the Twin writes as; this is the only
+    # field the server treats as permission.
+    is_admin: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -59,3 +62,33 @@ class UserListResponse(BaseModel):
 
     items: list[UserResponse]
     total: int
+
+
+class UserDeletionPreview(BaseModel):
+    """What deleting this user would destroy, counted per table.
+
+    Backs the confirmation dialog. Counts rather than a generic warning,
+    because "this will delete 14 drafts and 60 memories" is a decision somebody
+    can actually make, and "this cannot be undone" is not.
+
+    `shared_knowledge_documents` is listed to say what is *safe*: the company
+    knowledge base is shared, is not owned by this person, and is not part of
+    the deletion.
+    """
+
+    user_id: uuid.UUID
+    name: str
+    email: str
+    owned: dict[str, int]
+    owned_total: int
+    shared_knowledge_documents: int
+    shared_knowledge_note: str
+
+
+class UserDeletionResponse(BaseModel):
+    """What a completed deletion actually removed."""
+
+    user_id: uuid.UUID
+    deleted: dict[str, int]
+    total: int
+    shared_knowledge_documents: int

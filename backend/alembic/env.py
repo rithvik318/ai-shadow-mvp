@@ -10,7 +10,19 @@ from app.config.settings import settings
 from app.database.base import Base
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+
+# `settings.DATABASE_URL` is the default, not an override. A caller that has
+# already put a URL on the config — `command.upgrade` against a throwaway
+# database in `tests/database/test_migration_fidelity.py`, or `alembic -x` from
+# a shell — means it, and clobbering it here would silently migrate the
+# development database instead. `alembic.ini` deliberately omits the key, so
+# the ordinary path is unchanged.
+if not config.get_main_option("sqlalchemy.url", None):
+    config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+
+#: Resolved once, so offline and online mode cannot disagree about which
+#: database they are describing.
+database_url = config.get_main_option("sqlalchemy.url")
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -20,7 +32,7 @@ target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=settings.DATABASE_URL,
+        url=database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},

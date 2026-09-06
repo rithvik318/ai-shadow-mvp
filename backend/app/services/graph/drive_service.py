@@ -9,6 +9,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from app.services.graph import share_link
 from app.services.graph.client import GraphClient
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,23 @@ class DriveItem:
 
 
 def _parse_item(payload: dict, *, drive_id: str) -> DriveItem:
+    # A "shortcut to a shared folder" is a stub in one drive standing for an
+    # item in another. Its own id addresses the stub, which has no children and
+    # no delta of its own, so a sync pointed at it would find an empty folder
+    # and report success. `remoteItem` carries the real drive and item, and
+    # taking them is the difference between reading the shared folder and
+    # reading a pointer to it.
+    remote = payload.get("remoteItem")
+
+    if isinstance(remote, dict) and remote:
+        payload = {
+            **payload,
+            **remote,
+            # The stub's name is what a person sees in their own drive, and is
+            # the better label; everything else comes from the target.
+            "name": payload.get("name") or remote.get("name"),
+        }
+
     parent = payload.get("parentReference") or {}
     file_facet = payload.get("file") or {}
 
@@ -93,6 +111,53 @@ def resolve_folder(
         payload = client.get(f"/drives/{drive_id}/root")
 
     return _parse_item(payload, drive_id=drive_id)
+
+
+def resolve_shared_item(client: GraphClient, share_url: str) -> DriveItem:
+    """Ask Graph which drive item a sharing link stands for.
+
+    `/shares/{token}/driveItem` is the documented way to turn a sharing URL
+    into a real item. The token is the whole URL, encoded — nothing about the
+    link is interpreted here, and the `driveId` and `id` in the result are read
+    from Graph's answer. That is what makes this safe where decoding the id
+    that appears inside a sharing URL is not.
+
+    `$select` names `parentReference` explicitly because the drive id lives
+    there, and a shared item's drive is routinely not the drive anybody
+    configured.
+    """
+
+    token = share_link.sharing_token(share_url)
+
+    payload = client.get(
+        f"/shares/{token}/driveItem",
+        params={"$select": "id,name,size,cTag,eTag,file,folder,parentReference"},
+    )
+
+    parent = payload.get("parentReference") or {}
+
+    return _parse_item(payload, drive_id=str(parent.get("driveId") or ""))
+
+
+def search_folder(
+    client: GraphClient, *, drive_id: str, query: str, item_id: str | None = None
+) -> list[DriveItem]:
+    """Find items by name within a drive, or beneath one folder in it.
+
+    Exists for the case a configured path returns `itemNotFound`: the folder
+    may be real and one level deeper than anybody wrote down, and searching is
+    how that is settled in one call rather than by guessing at prefixes.
+    """
+
+    root = (
+        f"/drives/{drive_id}/items/{item_id}" if item_id else f"/drives/{drive_id}/root"
+    )
+    escaped = query.replace("'", "''")
+
+    return [
+        _parse_item(payload, drive_id=drive_id)
+        for payload in client.paged(f"{root}/search(q='{escaped}')")
+    ]
 
 
 def iter_files(

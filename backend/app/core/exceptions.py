@@ -140,6 +140,43 @@ class SyncSourceNotFoundError(SyncError):
     """Raised when a named source is not in the configured set."""
 
 
+class CalendarError(AIShadowError):
+    """Base class for failures about meetings and attendance."""
+
+
+class EventNotFoundError(CalendarError):
+    """Raised when no event with that id belongs to the calling user.
+
+    Not-found rather than forbidden: confirming that a row exists but belongs
+    to somebody else is itself a disclosure.
+    """
+
+
+class EventValidationError(CalendarError):
+    """Raised when an event's own details do not make sense."""
+
+
+class SourceUnresolvableError(SyncError):
+    """Raised when a configured folder cannot be turned into a drive item.
+
+    Carries a `remedy` because the useful information is rarely the failure
+    itself. "The folder is in a consumer OneDrive" and "the application has no
+    consent for this site" both read as a refusal and have entirely different
+    answers — one is a decision for whoever owns the content, the other for a
+    tenant administrator — and a message that does not distinguish them sends
+    somebody granting permissions that cannot possibly help.
+    """
+
+    def __init__(self, message: str, *, remedy: str | None = None) -> None:
+        super().__init__(message)
+        self.remedy = remedy
+
+    def __str__(self) -> str:
+        base = super().__str__()
+
+        return f"{base} {self.remedy}" if self.remedy else base
+
+
 class SyncAlreadyRunningError(SyncError):
     """Raised when a source is asked to synchronise while it already is.
 
@@ -192,6 +229,15 @@ class MalformedIdentityError(IdentityError):
 
 class UserNotFoundError(IdentityError):
     """Raised when the identity on a request names nobody."""
+
+
+class NotAuthorisedError(IdentityError):
+    """The caller is known, but is not allowed to do this.
+
+    Distinct from the identity errors around it: those mean "say who you are",
+    this means "you said, and it is not enough". Collapsing them would send a
+    normal user to a login screen they do not need.
+    """
 
 
 class DuplicateUserError(IdentityError):
@@ -286,4 +332,51 @@ class EmailSendError(EmailProviderError):
 
     Distinct from every error above because of what it must *not* do: a draft
     that raises this is recorded as `failed`, never as `sent`.
+    """
+
+
+class TaskError(AIShadowError):
+    """Anything wrong with a task or a report built from tasks."""
+
+
+class TaskNotFoundError(TaskError):
+    """No task with that id belongs to this user.
+
+    Deliberately not distinguished from "exists but belongs to somebody else".
+    A 403 there would confirm that another person's task exists, which is the
+    leak the user-scoped lookup exists to prevent.
+    """
+
+
+class TaskValidationError(TaskError):
+    """A task field was not usable — an empty title, most often."""
+
+
+class ReportError(AIShadowError):
+    """Anything wrong with generating or reading back a stored report."""
+
+
+class ReportPeriodError(ReportError):
+    """The requested period is not one this system can name.
+
+    A 400 rather than a fall back to the current period. Answering a request
+    for a badly spelled week with *this* week would show somebody a report they
+    did not ask for and give them no way to tell — the one failure mode a
+    report must not have.
+    """
+
+
+class TaskTransitionError(TaskError):
+    """The task exists and is the caller's, and this move is not allowed from
+    where it is.
+
+    A 409 rather than a 422, for the same reason an unapproved draft is: the
+    request is well formed and the caller is entitled to make it — the server
+    is simply not in a state where it can be honoured. The remedy is an action
+    on the task, not a correction to the request.
+
+    Completion is the only terminal state. Starting a finished task would clear
+    its completion stamp, and a lifecycle in which "done" can quietly become
+    "in progress" makes every completed count a claim about the present rather
+    than a record of what happened.
     """

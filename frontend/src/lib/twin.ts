@@ -75,3 +75,43 @@ export function parseList(value: string): string[] {
     .map((line) => line.trim())
     .filter(Boolean);
 }
+
+/**
+ * The per-table counts of a deletion preview, as sentences.
+ *
+ * A table name is not a warning. `email_assessment: 60` tells somebody nothing
+ * about what they are about to lose, and the dialog exists to make an
+ * irreversible act informed — so each table is named in the words the product
+ * uses for it, and tables with nothing in them are left out rather than
+ * padding the list with zeroes.
+ *
+ * A table this map does not know is still shown, humanised from its name,
+ * because silently omitting user data from a deletion warning is the one
+ * failure this function must not have.
+ */
+const OWNED_LABELS: Record<string, [string, string]> = {
+  task: ["task", "tasks"],
+  generated_report: ["stored report", "stored reports"],
+  calendar_event: ["meeting", "meetings"],
+  email_assessment: ["triaged message", "triaged messages"],
+  email_draft: ["email draft", "email drafts"],
+  email_attachment: ["attachment", "attachments"],
+  email_template: ["email template", "email templates"],
+  user_mailbox: ["mailbox configuration", "mailbox configurations"],
+  digital_twin_memory: ["memory", "memories"],
+  digital_twin_profile: ["profile", "profiles"],
+};
+
+export function describeOwnedData(owned: Record<string, number>): string[] {
+  return Object.entries(owned)
+    .filter(([, count]) => count > 0)
+    .map(([table, count]) => {
+      const [singular, plural] = OWNED_LABELS[table] ?? [
+        table.replace(/_/g, " "),
+        `${table.replace(/_/g, " ")} rows`,
+      ];
+
+      return `${count} ${count === 1 ? singular : plural}`;
+    })
+    .sort();
+}

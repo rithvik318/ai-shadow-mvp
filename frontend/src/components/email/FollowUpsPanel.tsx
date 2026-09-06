@@ -21,22 +21,41 @@ import { Badge, Button, EmptyState, ErrorNotice, Spinner } from "../ui";
 interface Props {
   userId: string;
   onDraftReply: (draft: EmailDraft) => void;
+  /** Take the person to their task list. Passed down rather than navigated to
+   * here, because which section is showing is the shell's business. */
+  onOpenTasks: () => void;
 }
 
-export function FollowUpsPanel({ userId, onDraftReply }: Props) {
+export function FollowUpsPanel({ userId, onDraftReply, onOpenTasks }: Props) {
   const [items, setItems] = useState<EmailAssessment[]>([]);
   const [includeHandled, setIncludeHandled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // Which triaged messages already have a task, keyed by the message id the
+  // task carries. Read from the task list rather than tracked here, so the
+  // "already added" state survives a reload and is true even when the task was
+  // created from somewhere else.
+  const [converted, setConverted] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
 
     try {
-      const list = await api.listEmailFollowUps(userId, { includeHandled });
+      const [list, tasks] = await Promise.all([
+        api.listEmailFollowUps(userId, { includeHandled }),
+        api.listTasks(userId),
+      ]);
+
       setItems(list.items);
+      setConverted(
+        Object.fromEntries(
+          tasks.items
+            .filter((task) => task.source_message_id)
+            .map((task) => [task.source_message_id as string, task.id]),
+        ),
+      );
     } catch (cause) {
       setError(
         cause instanceof ApiError ? cause.message : "Follow-ups could not be loaded.",
@@ -49,6 +68,37 @@ export function FollowUpsPanel({ userId, onDraftReply }: Props) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /**
+   * Put one triaged email on the task list.
+   *
+   * The server deduplicates on the message, so pressing this twice returns the
+   * task that already exists rather than a second copy — and the row then
+   * shows that it has been added rather than offering to add it again.
+   *
+   * It creates a task and nothing else. No message is sent, and the follow-up
+   * is not marked handled: deciding a thing is done is a person's call, and a
+   * button that did both would take it away.
+   */
+  async function addToTasks(assessment: EmailAssessment) {
+    setBusy(assessment.id);
+    setError(null);
+
+    try {
+      const task = await api.taskFromFollowUp(userId, assessment.id);
+
+      setConverted((existing) => ({
+        ...existing,
+        [assessment.provider_message_id]: task.id,
+      }));
+    } catch (cause) {
+      setError(
+        cause instanceof ApiError ? cause.message : "That task was not created.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function setHandled(assessment: EmailAssessment, handled: boolean) {
     setBusy(assessment.id);
@@ -112,7 +162,8 @@ export function FollowUpsPanel({ userId, onDraftReply }: Props) {
             Follow-ups <span className="font-normal text-ink-500">({items.length})</span>
           </h2>
           <p className="mt-0.5 text-xs text-ink-500">
-            Suggestions from triage. Nothing is sent or scheduled automatically.
+            Emails triage identified as needing action. Add one to your tasks to
+            track it; nothing is sent or scheduled automatically.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -150,6 +201,9 @@ export function FollowUpsPanel({ userId, onDraftReply }: Props) {
               busy={busy}
               onHandled={setHandled}
               onDraft={draftFollowUp}
+              onAdd={addToTasks}
+              converted={converted}
+              onOpenTasks={onOpenTasks}
             />
           ) : null}
           {upcoming.length > 0 ? (
@@ -159,6 +213,9 @@ export function FollowUpsPanel({ userId, onDraftReply }: Props) {
               busy={busy}
               onHandled={setHandled}
               onDraft={draftFollowUp}
+              onAdd={addToTasks}
+              converted={converted}
+              onOpenTasks={onOpenTasks}
             />
           ) : null}
         </>
@@ -173,12 +230,18 @@ function Group({
   busy,
   onHandled,
   onDraft,
+  onAdd,
+  converted,
+  onOpenTasks,
 }: {
   title: string;
   items: EmailAssessment[];
   busy: string | null;
   onHandled: (assessment: EmailAssessment, handled: boolean) => void;
   onDraft: (assessment: EmailAssessment) => void;
+  onAdd: (assessment: EmailAssessment) => void;
+  converted: Record<string, string>;
+  onOpenTasks: () => void;
 }) {
   return (
     <div>
@@ -216,7 +279,35 @@ function Group({
               </p>
             ) : null}
 
-            <div className="mt-3 flex flex-wrap gap-2">
+            {assessment.suggested_action ? (
+              <p className="mt-1 text-sm text-ink-700">
+                <span className="font-medium">Action:</span>{" "}
+                {assessment.suggested_action}
+              </p>
+            ) : null}
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {/* Added, or offering to add — never both, and never a button
+                  that silently makes a second copy. The state is read from the
+                  task list, so it is right after a reload and right when the
+                  task was created somewhere else. */}
+              {converted[assessment.provider_message_id] ? (
+                <>
+                  <Badge tone="positive">✓ Task created</Badge>
+                  <Button type="button" variant="ghost" onClick={onOpenTasks}>
+                    View task
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  type="button"
+                  variant="primary"
+                  onClick={() => onAdd(assessment)}
+                  disabled={busy === assessment.id}
+                >
+                  {busy === assessment.id ? "Adding…" : "Add to Tasks"}
+                </Button>
+              )}
               <Button
                 type="button"
                 onClick={() => onDraft(assessment)}

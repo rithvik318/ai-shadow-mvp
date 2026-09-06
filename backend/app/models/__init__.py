@@ -1,3 +1,4 @@
+from app.models.calendar import AttendanceEvidence, CalendarEvent, EventStatus
 from app.models.digital_twin import (
     DigitalTwinMemory,
     DigitalTwinProfile,
@@ -18,11 +19,20 @@ from app.models.email import (
     EmailPriority,
     EmailTemplate,
     EmailTemplateCategory,
+    UserMailbox,
+)
+from app.models.report import (
+    GeneratedReport,
+    ReportStatus,
+    ReportType,
 )
 from app.models.sync import OneDriveSyncState, SyncStatus
+from app.models.task import Task, TaskPriority, TaskStatus
 from app.models.user import User
 
 __all__ = [
+    "AttendanceEvidence",
+    "CalendarEvent",
     "DigitalTwinMemory",
     "DigitalTwinProfile",
     "Document",
@@ -36,9 +46,17 @@ __all__ = [
     "EmailPriority",
     "EmailTemplate",
     "EmailTemplateCategory",
+    "EventStatus",
+    "GeneratedReport",
     "IngestionResult",
     "MemoryType",
     "OneDriveSyncState",
+    "ReportStatus",
+    "ReportType",
     "SyncStatus",
+    "Task",
+    "TaskPriority",
+    "TaskStatus",
     "User",
+    "UserMailbox",
 ]

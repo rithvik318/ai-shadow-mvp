@@ -34,6 +34,7 @@ from app.core.exceptions import (
     TooManyAttachmentsError,
 )
 from app.models.email import EmailAttachment, EmailDraft, EmailDraftStatus
+from app.services.features.email.address import normalise_recipient_values
 
 logger = logging.getLogger(__name__)
 
@@ -66,17 +67,41 @@ _MIN_ADDRESS_PARTS = 2
 
 
 def normalise_recipients(values: list[str] | None) -> list[str]:
-    """Trim, drop blanks, and remove duplicates while keeping order.
+    """Reduce whatever was typed to the addresses that will actually be sent to.
 
-    Order is kept because recipient order is meaningful to the people reading
-    it — the first name on a To line is usually the person being asked.
+    Three things happen here, and the first is the one that matters.
+
+    **A display name is separated from its address.** `"Robert Keenan
+    <Robert.Keenan@sunradia.com>"` becomes `"Robert.Keenan@sunradia.com"`. This
+    is the boundary the defect has to be stopped at: every write path —
+    compose, draft creation, draft update, the follow-up panel — goes through
+    here, so there is one place to be right rather than four places to
+    remember. Before this, such a value reached `validate_recipients` and was
+    rejected for containing a space, which is safe but refuses something the
+    person plainly meant.
+
+    **One entry may hold several addresses.** Pasting `"a@x.com, b@y.com"` into
+    one field is ordinary, and reading it as a single malformed address would
+    reject it.
+
+    **Order is kept and duplicates are dropped**, case-insensitively. Recipient
+    order is meaningful to the people reading it — the first name on a To line
+    is usually the person being asked.
+
+    The display name is deliberately *not* stored: `EmailDraft.to_recipients`
+    is a list of addresses, that is what a provider is handed, and keeping a
+    parallel list of names would be a schema change nothing currently reads.
+    Sender names, where they do matter, are stored structurally on
+    `EmailAssessment` (`sender_name` / `sender_address`).
+
+    A value carrying a name but no address — `"Robert Keenan"` — is passed
+    through unchanged rather than dropped, so `validate_recipients` refuses it
+    by name instead of the recipient silently disappearing.
     """
 
     seen: list[str] = []
 
-    for value in values or []:
-        address = (value or "").strip()
-
+    for address in normalise_recipient_values(values):
         if address and address.lower() not in {item.lower() for item in seen}:
             seen.append(address)
 

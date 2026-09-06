@@ -72,24 +72,71 @@ def drive_item(
     return payload
 
 
+def shortcut_item(
+    item_id: str,
+    name: str,
+    *,
+    target_item_id: str,
+    target_drive_id: str,
+    folder: bool = True,
+) -> dict:
+    """A stub in one drive standing for an item in another.
+
+    What "Add shortcut to My files" leaves behind. The outer id addresses the
+    stub, which has no children of its own; the real drive and item are in
+    `remoteItem`. A test that does not distinguish the two cannot notice a sync
+    reading the pointer instead of the folder.
+    """
+
+    payload: dict[str, Any] = {
+        "id": item_id,
+        "name": name,
+        "parentReference": {"driveId": DRIVE_ID},
+        "remoteItem": {
+            "id": target_item_id,
+            "name": name,
+            "size": 4096,
+            "cTag": "remote-v1",
+            "parentReference": {"driveId": target_drive_id},
+        },
+    }
+
+    if folder:
+        payload["remoteItem"]["folder"] = {"childCount": 3}
+    else:
+        payload["remoteItem"]["file"] = {"mimeType": "text/plain"}
+
+    return payload
+
+
 def graph_transport(
     routes: dict[str, Any],
     *,
     downloads: dict[str, bytes] | None = None,
     token_status: int = 200,
+    redirects: dict[str, str] | None = None,
 ) -> httpx.MockTransport:
     """A transport that answers Graph URLs from a dict.
 
     Keys are matched as substrings of the request URL, longest first, so a
     test can register `/delta` without spelling out the whole absolute URL.
     Values are either a payload dict or an (status, payload) tuple.
+
+    `redirects` answers a matching URL with a 302 to the given target, so a
+    shortened sharing link can be followed the way the real one is. The target
+    still has to be answerable, or the redirect lands on a 404.
     """
 
     downloads = downloads or {}
+    redirects = redirects or {}
     ordered = sorted(routes, key=len, reverse=True)
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
+
+        for prefix, target in redirects.items():
+            if prefix in url:
+                return httpx.Response(302, headers={"Location": target})
 
         if TOKEN_URL_FRAGMENT in url:
             if token_status != 200:
@@ -129,6 +176,9 @@ class FakeGraphClient:
 
     delta_pages: list[tuple[list[dict], str | None]] = field(default_factory=list)
     folder: dict | None = None
+    #: The payload `/shares/{token}/driveItem` answers with, when a test
+    #: configures a source by sharing link.
+    shared: dict | None = None
     downloads: dict[str, bytes] = field(default_factory=dict)
     fail_downloads: set[str] = field(default_factory=set)
     expire_delta_on: set[int] = field(default_factory=set)
@@ -142,6 +192,12 @@ class FakeGraphClient:
     def get(self, path_or_url: str, params: dict | None = None) -> dict:
         if "/delta" in path_or_url or path_or_url.startswith("delta:"):
             return self._next_delta_payload(path_or_url)
+
+        if "/shares/" in path_or_url:
+            if self.shared is None:
+                raise GraphRequestError("Graph request failed (HTTP 404).")
+
+            return self.shared
 
         if self.folder is not None:
             return self.folder

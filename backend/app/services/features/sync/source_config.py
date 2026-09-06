@@ -22,6 +22,23 @@ class OneDriveSource:
     `path` and `item_id` are two ways of saying where the folder is, and an
     id is preferred once known — a path is only correct until somebody renames
     a parent.
+
+    `uri` is the human-facing address of the folder — the link somebody would
+    paste from a browser. It is carried for display only and never used to
+    address Graph.
+
+    `share_url` is different, and the difference matters. It is a sharing link
+    that Graph itself is asked to resolve, through `/shares/{token}`, when the
+    folder's drive is not known — content shared from another site or another
+    person's OneDrive has a drive id nobody has written down. The link is
+    handed to Graph whole and encoded; the `drive_id` and `item_id` come back
+    in Graph's answer. Nothing decodes the id that appears inside the URL,
+    which is a different act with the same shape and is how these integrations
+    end up pointed at the wrong folder.
+
+    `enabled` is how a source is taken out of the rotation without deleting
+    its configuration. A disabled source keeps its key, and therefore its
+    stored delta token, so re-enabling it resumes rather than re-indexing.
     """
 
     key: str
@@ -29,6 +46,15 @@ class OneDriveSource:
     drive_id: str | None = None
     path: str | None = None
     item_id: str | None = None
+    share_url: str | None = None
+    uri: str | None = None
+    enabled: bool = True
+
+    @property
+    def addressed_by_share_link(self) -> bool:
+        """True when only Graph can say which drive this folder is in."""
+
+        return bool(self.share_url) and not (self.item_id or self.path)
 
 
 def _require(entry: dict, index: int) -> str:
@@ -89,31 +115,62 @@ def load_sources(raw: str | None = None) -> list[OneDriveSource]:
 
         path = entry.get("path")
         item_id = entry.get("item_id")
+        share_url = entry.get("share_url")
 
-        if not path and not item_id:
+        if not path and not item_id and not share_url:
             raise SyncNotConfiguredError(
-                f"ONEDRIVE_SOURCES entry {key!r} needs either `path` or `item_id`."
+                f"ONEDRIVE_SOURCES entry {key!r} needs `path`, `item_id` or "
+                "`share_url`."
             )
 
         drive_id = entry.get("drive_id") or settings.ONEDRIVE_DRIVE_ID
 
-        if not drive_id:
+        # A share link names its own drive once Graph resolves it, so requiring
+        # one up front would mean inventing a drive id to satisfy a check —
+        # and an invented drive id addressed a real drive that was the wrong
+        # one. Path and id addressing still need it: they are relative to a
+        # drive and mean nothing without one.
+        if not drive_id and not share_url:
             raise SyncNotConfiguredError(
                 f"ONEDRIVE_SOURCES entry {key!r} has no `drive_id`, and "
                 "ONEDRIVE_DRIVE_ID is not set."
+            )
+
+        enabled = entry.get("enabled", True)
+
+        if not isinstance(enabled, bool):
+            # A string "false" is truthy, which would silently keep a source
+            # somebody believed they had switched off.
+            raise SyncNotConfiguredError(
+                f"ONEDRIVE_SOURCES entry {key!r} has a non-boolean `enabled`. "
+                "Use JSON true or false."
             )
 
         sources.append(
             OneDriveSource(
                 key=key,
                 label=str(entry.get("label") or path or key),
-                drive_id=str(drive_id),
+                drive_id=str(drive_id) if drive_id else None,
                 path=str(path) if path else None,
                 item_id=str(item_id) if item_id else None,
+                share_url=str(share_url) if share_url else None,
+                uri=str(entry["uri"]) if entry.get("uri") else None,
+                enabled=enabled,
             )
         )
 
     return sources
+
+
+def enabled_sources(raw: str | None = None) -> list[OneDriveSource]:
+    """The sources a scheduled or unqualified run should touch.
+
+    Separate from `load_sources` because status screens need to show a
+    disabled source — "configured but switched off" is information, and a
+    source that vanished from the list would read as a configuration mistake.
+    """
+
+    return [source for source in load_sources(raw) if source.enabled]
 
 
 def get_source(key: str, raw: str | None = None) -> OneDriveSource:

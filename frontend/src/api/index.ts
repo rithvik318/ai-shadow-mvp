@@ -3,7 +3,7 @@
  * they can be grepped against `backend/app/api/` in one pass.
  */
 
-import { request, upload } from "./client";
+import { download, request, upload } from "./client";
 import type {
   ComposeRequest,
   ComposeResponse,
@@ -19,6 +19,11 @@ import type {
   EmailInbox,
   EmailMessageInput,
   EmailProviderStatus,
+  Mailbox,
+  MailboxUpdate,
+  ReportEnvelope,
+  ReportHistory,
+  ReportType,
   EmailTemplate,
   EmailTemplateCreate,
   EmailTemplateFilled,
@@ -28,10 +33,23 @@ import type {
   TriagedMessage,
   BatchUploadResponse,
   ChatResponse,
+  CalendarEvent,
+  CorpusStats,
   DocumentList,
   DocumentStatus,
   DocumentSummary,
+  EventCreate,
+  EventList,
+  EventStatus,
   Memory,
+  Task,
+  TaskCreate,
+  TaskList,
+  TaskStatus,
+  TaskUpdate,
+  UserDeletionPreview,
+  UserDeletionResult,
+  WeeklyReport,
   MemoryCreate,
   MemoryList,
   MemoryType,
@@ -48,10 +66,15 @@ import type {
 
 // --- users (backend/app/api/user_routes.py) ------------------------------
 
-export const listUsers = () => request<UserList>("/users");
+// The user registry and the shared corpus send no identity: `userId: null`
+// is a decision, not an omission. `/documents`, `/search` and `/sync` are
+// company-wide, and a header there would imply a per-user corpus that does
+// not exist; `/users` is how the workspace discovers who it could act as, so
+// it cannot require having already chosen.
+export const listUsers = () => request<UserList>("/users", { userId: null });
 
 export const createUser = (body: UserCreate) =>
-  request<User>("/users", { method: "POST", body });
+  request<User>("/users", { method: "POST", body, userId: null });
 
 // --- chat (backend/app/api/chat_routes.py) -------------------------------
 
@@ -76,6 +99,7 @@ export const searchDocuments = (
   options: { topK?: number; signal?: AbortSignal } = {},
 ) =>
   request<SearchResponse>("/search", {
+    userId: null,
     method: "POST",
     body: { question, top_k: options.topK ?? null },
     signal: options.signal,
@@ -87,6 +111,7 @@ export const listDocuments = (
   options: { status?: DocumentStatus; limit?: number; offset?: number } = {},
 ) =>
   request<DocumentList>("/documents", {
+    userId: null,
     query: {
       status: options.status,
       limit: options.limit ?? 50,
@@ -94,10 +119,18 @@ export const listDocuments = (
     },
   });
 
-export const getDocument = (id: string) => request<DocumentSummary>(`/documents/${id}`);
+/**
+ * Corpus totals. Separate from `listDocuments` because a page of documents is
+ * a sample and this is a count.
+ */
+export const getCorpusStats = () =>
+  request<CorpusStats>("/documents/stats", { userId: null });
+
+export const getDocument = (id: string) =>
+  request<DocumentSummary>(`/documents/${id}`, { userId: null });
 
 export const deleteDocument = (id: string) =>
-  request<void>(`/documents/${id}`, { method: "DELETE" });
+  request<void>(`/documents/${id}`, { method: "DELETE", userId: null });
 
 /**
  * The batch endpoint, always — including for one file.
@@ -112,6 +145,7 @@ export const uploadDocuments = (files: File[], signal?: AbortSignal) => {
   for (const file of files) form.append("files", file, file.name);
 
   return upload<BatchUploadResponse>("/documents/batch-upload", form, {
+    userId: null,
     signal,
   });
 };
@@ -145,11 +179,13 @@ export const deleteMemory = (userId: string, id: string) =>
 //
 // Not user-scoped: the knowledge base is shared, so no X-User-ID is sent.
 
-export const getSyncStatus = () => request<SyncStatusResponse>("/sync/onedrive/status");
+export const getSyncStatus = () =>
+  request<SyncStatusResponse>("/sync/onedrive/status", { userId: null });
 
 export const runSync = (options: { source?: string; full?: boolean } = {}) =>
   request<SyncRunResponse>("/sync/onedrive", {
     method: "POST",
+    userId: null,
     body: { source: options.source ?? null, full: options.full ?? false },
   });
 
@@ -168,7 +204,8 @@ export const updateEmailTemplate = (
   userId: string,
   id: string,
   body: EmailTemplateUpdate,
-) => request<EmailTemplate>(`/email/templates/${id}`, { method: "PATCH", body, userId });
+) =>
+  request<EmailTemplate>(`/email/templates/${id}`, { method: "PATCH", body, userId });
 
 export const deleteEmailTemplate = (userId: string, id: string) =>
   request<void>(`/email/templates/${id}`, { method: "DELETE", userId });
@@ -247,8 +284,17 @@ export const sendEmailDraft = (userId: string, id: string) =>
 
 // --- Email Agent: generation, mailbox, triage (email_routes.py) ----------
 
-export const getEmailProviderStatus = () =>
-  request<EmailProviderStatus>("/email/provider/status");
+/**
+ * Whether *this* user's mailbox is reachable.
+ *
+ * The user is named explicitly rather than left to the ambient identity. Both
+ * resolve to the same person today, but a call that states whose answer it
+ * wants cannot be misattributed when one is in flight as somebody switches —
+ * and the endpoint is per-user, so the identity is part of the question rather
+ * than a header the client happens to add.
+ */
+export const getEmailProviderStatus = (userId?: string) =>
+  request<EmailProviderStatus>("/email/provider/status", { userId });
 
 export const composeEmail = (userId: string, body: ComposeRequest) =>
   request<ComposeResponse>("/email/compose", { method: "POST", body, userId });
@@ -307,3 +353,145 @@ export const setEmailFollowUpHandled = (
     body: { handled },
     userId,
   });
+
+// --- tasks, events and the weekly report (backend/app/api/task_routes.py) -
+//
+// Every one is user-scoped: tasks, events and the report are private, exactly
+// as profile and memory are.
+
+export const listTasks = (userId: string, options: { status?: TaskStatus } = {}) =>
+  request<TaskList>("/tasks", { userId, query: { task_status: options.status } });
+
+export const createTask = (userId: string, body: TaskCreate) =>
+  request<Task>("/tasks", { method: "POST", body, userId });
+
+export const updateTask = (userId: string, id: string, body: TaskUpdate) =>
+  request<Task>(`/tasks/${id}`, { method: "PATCH", body, userId });
+
+export const completeTask = (userId: string, id: string) =>
+  request<Task>(`/tasks/${id}/complete`, { method: "POST", userId });
+
+export const deleteTask = (userId: string, id: string) =>
+  request<void>(`/tasks/${id}`, { method: "DELETE", userId });
+
+export const tasksFromFollowUps = (userId: string) =>
+  request<TaskList>("/tasks/from-follow-ups", { method: "POST", userId });
+
+/**
+ * Add one triaged email to this user's tasks, and get the task back.
+ *
+ * The bulk sweep above answers "make tasks for everything", which tells a
+ * person nothing about the one message they were looking at. This returns the
+ * task so the UI can show it. Pressing it twice returns the same task —
+ * deduplication is the server's, keyed on the message.
+ */
+export const taskFromFollowUp = (userId: string, assessmentId: string) =>
+  request<Task>(`/tasks/from-follow-up/${assessmentId}`, {
+    method: "POST",
+    userId,
+  });
+
+export const getWeeklyReport = (userId: string) =>
+  request<WeeklyReport>("/reports/weekly", { userId });
+
+export const listEvents = (userId: string) => request<EventList>("/events", { userId });
+
+export const createEvent = (userId: string, body: EventCreate) =>
+  request<CalendarEvent>("/events", { method: "POST", body, userId });
+
+/**
+ * Record what a person says happened. The only route by which an event
+ * becomes attended or missed — nothing infers it from a meeting existing.
+ * `unknown` withdraws an answer.
+ */
+export const markAttendance = (
+  userId: string,
+  id: string,
+  status: EventStatus,
+  note?: string,
+) =>
+  request<CalendarEvent>(`/events/${id}/attendance`, {
+    method: "POST",
+    body: { status, note: note ?? null },
+    userId,
+  });
+
+export const deleteEvent = (userId: string, id: string) =>
+  request<void>(`/events/${id}`, { method: "DELETE", userId });
+
+// --- user deletion (backend/app/api/user_routes.py) ----------------------
+//
+// Admin-only on the server, and both calls name the user in the path rather
+// than taking them from the header: an administrator is acting *on* somebody
+// else, which is the one place a user id legitimately travels in a URL.
+
+export const previewUserDeletion = (adminId: string, userId: string) =>
+  request<UserDeletionPreview>(`/users/${userId}/deletion-preview`, {
+    userId: adminId,
+  });
+
+export const deleteUser = (adminId: string, userId: string) =>
+  request<UserDeletionResult>(`/users/${userId}`, {
+    method: "DELETE",
+    userId: adminId,
+  });
+
+// --- reports and digests (backend/app/api/report_routes.py) --------------
+//
+// User-scoped like every other report call. `period` is omitted for the
+// period in progress; a key that is not a period the server can name comes
+// back as a 400 rather than being quietly swapped for the current one.
+
+export const getReport = (
+  userId: string,
+  options: { reportType?: ReportType; period?: string; refresh?: boolean } = {},
+) =>
+  request<ReportEnvelope>("/reports", {
+    userId,
+    query: {
+      report_type: options.reportType,
+      period: options.period,
+      refresh: options.refresh ? "true" : undefined,
+    },
+  });
+
+export const getReportHistory = (
+  userId: string,
+  options: { reportType?: ReportType } = {},
+) =>
+  request<ReportHistory>("/reports/history", {
+    userId,
+    query: { report_type: options.reportType },
+  });
+
+/**
+ * Snapshot the caller's last completed week and month of email now, the same
+ * way the schedule does. Only ever runs for the caller.
+ */
+export const runDigests = (userId: string) =>
+  request<ReportHistory>("/reports/digests/run", { method: "POST", userId });
+
+/** One stored report as a Word document, with the filename the server chose. */
+export const downloadReport = (
+  userId: string,
+  options: { reportType: ReportType; period: string },
+) =>
+  download("/reports/document", {
+    userId,
+    query: { report_type: options.reportType, period: options.period },
+  });
+
+// --- the caller's mailbox (backend/app/api/email_routes.py) --------------
+//
+// Whose mailbox this is comes from the identity header, never from the body.
+// There is no call here that names another user, which is why connecting a
+// mailbox needs no user id typed into a form.
+
+export const getMailbox = (userId: string) =>
+  request<Mailbox>("/email/mailbox", { userId });
+
+export const setMailbox = (userId: string, body: MailboxUpdate) =>
+  request<Mailbox>("/email/mailbox", { method: "PUT", body, userId });
+
+export const disconnectMailbox = (userId: string) =>
+  request<Mailbox>("/email/mailbox", { method: "DELETE", userId });

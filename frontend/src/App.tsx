@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { EmailPanel } from "./components/email/EmailPanel";
+import { ReportsPanel } from "./components/reports/ReportsPanel";
+import { TasksPanel } from "./components/tasks/TasksPanel";
 import { KnowledgePanel } from "./components/knowledge/KnowledgePanel";
 import { Sidebar, type Section } from "./components/Sidebar";
 import { TwinsPanel } from "./components/twins/TwinsPanel";
@@ -140,7 +142,25 @@ function Workspace() {
           ☰ Menu
         </button>
 
-        <main className="min-h-0 flex-1">
+        {/*
+          Keyed on the selected Digital Twin, and that one attribute is the
+          root fix for a whole class of bug.
+
+          Every user-scoped panel held the previous person's data in component
+          state until its own fetch returned — so for as long as the network
+          took, Robert's screen showed Sudha's mailbox, her tasks, her
+          follow-ups. Clearing that inside each panel means writing the same
+          guard correctly in a dozen components and in every one added later,
+          and an effect that clears state runs *after* the render that already
+          painted the wrong data.
+
+          Changing the key makes React discard the subtree and mount a fresh
+          one. There is no frame in which the new person's screen contains the
+          old person's rows, because the components holding them no longer
+          exist. It costs a remount per switch, which is the correct price:
+          switching identity is exactly the moment nothing should be reused.
+        */}
+        <main className="min-h-0 flex-1" key={currentTwin?.id ?? "no-twin"}>
           {section === "chat" ? (
             <ChatPanel
               key={active.id}
@@ -152,7 +172,11 @@ function Workspace() {
           ) : section === "twins" ? (
             <TwinsPanel />
           ) : section === "email" ? (
-            <EmailPanel />
+            <EmailPanel onOpenTasks={() => setSection("tasks")} />
+          ) : section === "tasks" ? (
+            <TasksPanel />
+          ) : section === "report" ? (
+            <ReportsPanel />
           ) : (
             <KnowledgePanel reloadToken={reloadToken} />
           )}

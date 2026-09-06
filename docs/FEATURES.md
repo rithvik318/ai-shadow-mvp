@@ -100,6 +100,57 @@ Everything is user-scoped: templates, drafts and assessments are private, and an
 - **Status:** Implemented — **no live mailbox has been connected**
 - **Dependencies:** Multi-User Digital Twin, Persona-Aware RAG, Analysis Engine, Prompt Registry System, Microsoft Graph Client
 
+### Activity Reports
+Reports answer "what happened"; Tasks answers "what do I need to do". Keeping those apart is what the Reports section is for. Two documents — a **Weekly Activity Report** and a **Monthly Activity Report** — in eight sections: executive summary, major workstreams, important conversations, decisions and outcomes, requires follow-up, completed work, risks and issues, and the bottom line. A stored report downloads as `.docx` from `GET /reports/document`, rendered from the snapshot rather than rebuilt, so the file and the screen agree today and next month.
+
+**Nothing in a report is invented and no model writes any of it.** Every line is assembled from a count or a row: correspondents from the digest, completed and outstanding work from tasks, risks from what is more than two days late. "Major workstreams" is explicitly a grouping by correspondent rather than an inferred project list — inferring a project from a set of subject lines is a guess, and a guess in a report somebody signs is their problem. Sections with nothing in them are omitted rather than printed over the word "None". A period with no mailbox still produces a report: the task half is real, and the email half says it was unavailable.
+
+The interactive weekly work view — meetings needing an answer, escalations — is still reachable as the last tab, because those are actions on live work and a snapshot has nothing to act on.
+
+### Report persistence and history
+Three report types, one envelope, and history that does not move. `GET /reports?report_type=&period=&refresh=`, `GET /reports/history?report_type=`, `POST /reports/digests/run`. The existing `GET /reports/weekly` is unchanged and still serves the live work report.
+
+**A period actually selects that period.** The work report is evaluated as of `min(period_end, now)` — the instant the week ended, or now if it has not. A task is included only if it existed by then (`created_at`), and whether it was outstanding is read from `completed_at` rather than from `status`, which is only ever current. So last week shows the work that was open last week, a task finished since reads as it read then, and a completion counts in the period it happened in. The selector offers the running period, the one just finished, and any period this user has a stored report for — not a dozen guaranteed-empty months.
+
+**Periods are calendar arithmetic, not "the last seven days".** `app/services/features/reports/period.py` is pure: ISO weeks beginning Monday and calendar months, in UTC, half-open (`start <= t < end`) so a message at a boundary belongs to exactly one period. A period's `key` — `2026-08-31` for a week, `2026-08` for a month — round-trips, and a week key that is not a Monday is a `400` rather than a silent swap for the current week.
+
+**A closed period is written once and read back forever.** `generated_report` stores the rendered report as JSON, unique per `(user_id, report_type, period_start)`. A report generated while its period is still running is marked `is_provisional` and is replaced on the next request; once the period closes the next generation writes the final row and nothing overwrites it after that. That is what makes "what did the last week of August say" answerable — regenerating a work report a month later would describe a month-later set of tasks.
+
+**The two email digests count real mailbox activity** for the period: received and sent, triage's categories and priorities where triage ran, top correspondents, what is waiting on a reply, and what was flagged urgent. Deterministic — no model call, no prompt. A message nobody has triaged is reported as `untriaged` and is never given a category; a message the provider returned without a timestamp is counted in no period at all.
+
+**"Could not be produced" is a different row from "nothing happened".** With no mailbox connected, the digest is recorded with `status = unavailable`, an empty `content` and the reason in words — never as an empty digest, which would assert that a mailbox was read and held nothing. The provider boundary offers no date range, so a bounded page can cut a window short; when the oldest message fetched still falls inside the period the digest reports `truncated` rather than presenting a partial count as a total.
+
+**Scheduling reuses `SyncScheduler`** — no workflow engine, no second piece of infrastructure. `REPORT_DIGEST_SCHEDULE_ENABLED` (off by default) runs a tick that asks whether each user's last *completed* week and month are recorded and records them if not. Idempotent by construction: a period already snapshotted costs one indexed lookup per user per type and no mailbox call.
+
+Stored reports are owned by their user, cascade on deletion, and are listed in the deletion preview. History filters on `user_id` unconditionally; there is no call shape that returns another person's report.
+- **Status:** Implemented — the digests have **never been generated against a live mailbox**, because no mailbox has been connected
+- **Dependencies:** Email Agent, Email Provider Abstraction, Multi-User Digital Twin, Scheduled Synchronization
+
+### Tasks
+One page answering one question: what do I need to do. `GET/POST /tasks`, `PATCH/DELETE /tasks/{id}`, `POST /tasks/{id}/complete`.
+
+**Four colours, decided on the server.** `services/features/tasks/signal.py` maps completion and the deadline to `todo`, `attention`, `urgent` or `done`; the frontend renders grey, amber, red and green and subtracts no dates. Lateness is counted in **whole days**, which is what makes "exactly two days is amber, more than two is red" a band rather than a knife-edge: a task 2 days and 6 hours late reads as "2 days overdue" and is amber for the whole of that day. A task with no deadline is grey forever — nothing was promised, and inventing a date to have something to colour is the one thing this does not do. `completed` and `cancelled` share the green signal because neither needs attention; the label distinguishes them from `status`.
+
+**A task arrives one of two ways and both produce the same row.** A person types it in the New Task form — title, optional summary, optional deadline, priority, and nothing else, because every other column exists to carry what a triaged email knew — or a triaged email becomes one through `POST /tasks/from-follow-up/{assessment_id}`, which returns the task so the UI can show it. Pressing that twice returns the same task: `source_key` is the message's identity and is unique per user. The summary is triage's own; no second model call produces a second opinion.
+
+The bulk `POST /tasks/from-follow-ups` remains for sweeping every open follow-up at once.
+- **Status:** Implemented
+- **Dependencies:** Email Agent, Multi-User Digital Twin
+
+### Task Lifecycle
+`todo → in_progress → completed`, with `blocked` and `cancelled` off to the side. Moves go through `PATCH /tasks/{id}` (or `POST /tasks/{id}/complete`, which is the same operation named for the button that presses it), and the allowed moves are declared once in `task_service._ALLOWED_TRANSITIONS` rather than checked at each call site.
+
+Completion is nearly terminal, and the asymmetry is the whole rule. Marking a finished task **to do** is an explicit correction — the work came back — and clears `completed_at`, because a reopened task still claiming a completion time is a lie. **Starting** a completed task is refused with a `409`, because that is a lifecycle step assuming the work was outstanding, and allowing it would let "done" drift into "in progress" through a misclick. A refused move leaves the row exactly as it was. Same-state moves are no-ops, so pressing a button twice is a person being unsure rather than an error.
+
+Started work is still outstanding work: it stays overdue, stays escalated, and is not an achievement. Completion is what moves it out of the open sections and into `completed`.
+- **Status:** Implemented
+- **Dependencies:** Multi-User Digital Twin
+
+### Administrator Bootstrap
+`is_admin` guards exactly one operation — deleting another person's Digital Twin — and no endpoint grants it, because one that promoted the caller would make the check decorative. That left a deadlock: a deployment with users and no administrator could never gain one. On startup, if nobody is an administrator, exactly one user is promoted and the promotion is logged as a warning: the user named by `BOOTSTRAP_ADMIN_EMAIL`, or the earliest-created user — the CEO, the first Digital Twin — when that is unset. Nobody is ever demoted, no second person is ever promoted, and no user is ever created; a fresh install has none, and the first user made through the API becomes the administrator on the next start. `role` is never read as permission.
+- **Status:** Implemented
+- **Dependencies:** Multi-User Digital Twin
+
 ### Email Provider Abstraction
 `EmailProvider` in `app/services/email/provider/base.py` is a `Protocol` over provider-neutral dataclasses — `EmailMessage`, `EmailAddress`, `AttachmentRef`, `OutgoingEmail`, `SendReceipt`, `ProviderStatus`. Nothing above it contains a vendor's word, and nothing in the package imports a service, a model or a schema. `registry.get_provider()` returns the configured provider or raises; `registry.status()` describes the connection and never raises, so a UI can render a setup notice rather than an error page.
 
@@ -178,11 +229,28 @@ Attribution of individual claims to specific passages, by having the model cite 
 - **Dependencies:** RAG Chat, Analysis Engine
 
 ### OneDrive Synchronization
-Keeps the knowledge base in step with configured OneDrive folders, over Microsoft Graph. Folders come from `ONEDRIVE_SOURCES` — a JSON array of `{key, path | item_id}` — so adding one is a configuration change; no folder is named in code. Each file is downloaded to a temporary path, passed to the same ingestion service the upload endpoints use, and the staged copy is removed whether ingestion succeeded or not. OneDrive is never mirrored locally.
+Keeps the knowledge base in step with configured OneDrive folders, over Microsoft Graph. Folders come from `ONEDRIVE_SOURCES` — a JSON array of `{key, label?, drive_id?, path | item_id, uri?, enabled?}` — so adding one is a configuration change; no folder is named in code. `enabled: false` pauses a source without deleting it: the delta token is stored against the key, so re-enabling resumes rather than re-indexing the folder, and a disabled source is still reported by the status endpoint because "switched off" is information and a vanished row reads as a mistake. Each file is downloaded to a temporary path, passed to the same ingestion service the upload endpoints use, and the staged copy is removed whether ingestion succeeded or not. OneDrive is never mirrored locally.
 
 Identity is the Graph item: `source_uri` is `onedrive:{drive_id}:{item_id}` and `source_version` is the item's cTag, which changes on a content edit but not on a metadata one. So an unchanged file is skipped without being re-parsed or re-embedded, a modified file re-indexes in place and its old chunks stop being retrievable, a renamed or moved file stays one document, and a deleted file takes its document and chunks with it.
 
 The first run is a full enumeration that also establishes a delta token; later runs ask Graph only for what changed. An expired token falls back to a full resynchronisation, which is safe rather than expensive-and-wrong, because unchanged content is skipped. `POST /sync/onedrive` runs one source or all of them and reports per-file results; `GET /sync/onedrive/status` reports stored state without contacting Graph and never returns the delta token. `ONEDRIVE_SYNC_ENABLED` adds a periodic incremental run.
+
+Failure is scoped at three levels: one file's failure is that file's, one source's failure is that source's, and a source that fails before any work is done keeps its state untouched including its delta token. A source is released from `running` on every outcome, so an unforeseen error cannot leave a folder blocked behind a flag nobody set deliberately.
+- **Status:** Implemented
+
+### OneDrive Source Resolution
+Turns a configured folder into the `drive_id` and `item_id` Microsoft Graph answers to, by asking Graph. Three ways a folder can be named, three questions: a path in a known drive, an item id in a known drive, or a **sharing link** resolved through `/shares/{token}/driveItem`. The last is the only route for content that arrived as a share, because such a folder's drive id is not written down anywhere. Resolution runs on the sync path as well as ahead of time, so configuring a link is enough for a first run — no pinning step stands in between.
+
+A shortened link (`1drv.ms`) is followed before it is resolved, because `/shares` is told a URL and a short link is a redirect rather than the URL of anything. Following it also reveals the destination host, which is the single fact that decides whether an application-only token can ever reach the content: a `*.sharepoint.com` or `*-my.sharepoint.com` host is in-tenant and covered by `Files.Read.All`, while `onedrive.live.com` is a consumer Microsoft account that belongs to no tenant and that no consent granted to this application can reach. That case is reported as `outside_tenant` **without asking Graph**, because the 403 Graph would return is indistinguishable from a missing permission and sends people granting permissions that cannot help. `access_denied` (in-tenant, not consented — an administrator can fix it) and `not_found` (a wrong path — ours to fix) are separate verdicts for the same reason.
+
+A shortcut to a shared folder — what "Add shortcut to My files" leaves behind — is followed to its target through the item's `remoteItem`. The stub has no children and no delta of its own, so a sync pointed at the stub's id finds an empty folder and reports success: a silent, complete failure.
+
+Turns a configured folder path into the `drive_id` and `item_id` Microsoft Graph answers to, by asking Graph. **No id is ever derived from a URL** — a sharing link contains something that looks like an id, and decoding one is the usual way an integration ends up pointed confidently at the wrong folder. `source_resolver.resolve_sources` resolves each configured source independently, so one misspelled path reports an error while the rest resolve, and `to_configuration` renders the successes as an `ONEDRIVE_SOURCES` line with ids filled in. `python -m scripts.discover_onedrive_sources --resolve` is the command-line face of it, and exits non-zero when anything failed to resolve, so it doubles as a deployment check. Not on the synchronisation path: the sync service resolves lazily on first contact and stores what it got. Resolving ahead of time moves a bad path from a 3am failure to a configuration-time one.
+- **Status:** Implemented
+- **Dependencies:** OneDrive Synchronization, Microsoft Graph Client
+
+### Knowledge Base Status
+What the Knowledge Base screen shows, assembled from two endpoints that each own their facts. `GET /sync/onedrive/status` owns per-source state: every configured source appears — including ones that have never run, ones switched off, and ones whose configuration was removed but whose documents are still indexed — with its status, last attempted and last successful run, and the per-outcome counts of its last run. `GET /documents/stats` owns corpus totals: documents by ingestion status, total chunks and how many carry an embedding, counted in the database. The counts were previously derived in the browser from whichever page of documents happened to be loaded, which was a sample presented as a total. No aggregate `/kb/status` endpoint exists, because composing two endpoints that already own their halves is cheaper than a third that restates both.
 - **Status:** Implemented
 - **Dependencies:** Document Identity & Idempotent Ingestion, Microsoft Graph Client
 

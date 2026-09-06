@@ -4,13 +4,21 @@ import { groupConversations, type Conversation } from "../lib/conversations";
 import { useTwins } from "../state/TwinContext";
 import { Button } from "./ui";
 
-export type Section = "chat" | "twins" | "knowledge" | "email";
+export type Section =
+  | "chat"
+  | "twins"
+  | "knowledge"
+  | "email"
+  | "tasks"
+  | "report";
 
 const SECTIONS: Array<{ id: Section; label: string; hint: string }> = [
   { id: "chat", label: "Chat", hint: "Ask your Digital Twin" },
   { id: "twins", label: "Digital Twins", hint: "Profiles, preferences, memory" },
   { id: "knowledge", label: "Knowledge Base", hint: "Documents and sync" },
   { id: "email", label: "Email Agent", hint: "Draft, triage, follow up" },
+  { id: "tasks", label: "Tasks", hint: "What you need to do" },
+  { id: "report", label: "Reports", hint: "Work report and email digests" },
 ];
 
 interface Props {

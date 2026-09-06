@@ -146,6 +146,23 @@ List documents, newest first.
 
 Returns `200`, or `422` for an out-of-range `limit` or `offset`.
 
+### `GET /documents/stats`
+
+Corpus-wide counts, computed in the database rather than by counting a page of
+results.
+
+```json
+{
+  "documents": 412,
+  "chunks": 8137,
+  "embedded_chunks": 8137,
+  "by_status": { "pending": 0, "processing": 0, "indexed": 409, "failed": 2, "unsupported": 1 }
+}
+```
+
+`embedded_chunks` below `chunks` means some passages are stored but not yet
+searchable; `scripts/backfill_embeddings.py` finishes them.
+
 ### `GET /documents/{id}`
 
 Return one document by UUID, including `error_message` when ingestion failed. Returns `200`, `404` if unknown, or `422` for a malformed UUID.
@@ -342,6 +359,55 @@ Stored sync state for every configured source. Contacts nothing. Never returns
 the delta token itself — only `has_delta_token` — because the token is a bearer
 credential for the window it describes.
 
+Every configured source appears, including ones that have never run
+(`never_run`) and ones switched off (`enabled: false`). A source with stored
+state that is no longer in `ONEDRIVE_SOURCES` also appears, marked
+`configured: false` — its documents are still in the knowledge base, so hiding
+it would make them look like they came from nowhere.
+
+```json
+{
+  "configured": true,
+  "scheduled": true,
+  "interval_seconds": 3600,
+  "configuration_error": null,
+  "sources": [
+    {
+      "source_key": "capabilities",
+      "label": "Capabilities",
+      "path": "Documents/Capabilities",
+      "uri": null,
+      "enabled": true,
+      "configured": true,
+      "drive_id": "b!…",
+      "item_id": "01ABC…",
+      "status": "succeeded",
+      "has_delta_token": true,
+      "error_message": null,
+      "last_attempted_at": "2026-08-31T02:00:04Z",
+      "last_succeeded_at": "2026-08-31T02:00:04Z",
+      "last_duration_ms": 41230,
+      "last_discovered": 96,
+      "last_indexed": 3,
+      "last_replaced": 1,
+      "last_unchanged": 91,
+      "last_deleted": 1,
+      "last_unsupported": 0,
+      "last_failed": 0
+    }
+  ]
+}
+```
+
+`last_discovered` is derived from the counts beneath it rather than stored, so
+it cannot disagree with them. `configuration_error` is set when
+`ONEDRIVE_SOURCES` could not be parsed — "configured wrongly" and "not
+configured" look identical from a status screen unless one of them says so.
+
+Combine this with `GET /documents/stats` for a complete Knowledge Base view:
+this endpoint owns the per-source facts, that one owns the corpus totals, and
+neither restates the other.
+
 ### Email Agent
 
 The Email Agent drafts as your Digital Twin, grounded in the shared knowledge
@@ -513,6 +579,74 @@ soonest-due first with undated ones last.
 Marks a follow-up dealt with, or puts it back. Always yours to press — nothing
 marks itself handled.
 
+### Reports
+
+Three reports share one envelope. `report_type` selects between them, and
+`period` selects the window — omit it for the period in progress.
+
+#### `GET /reports`
+
+| Query | Values | Default | Meaning |
+|---|---|---|---|
+| `report_type` | `weekly_work` \| `weekly_email_digest` \| `monthly_email_digest` | `weekly_work` | Which report |
+| `period` | `2026-08-31` (a Monday) or `2026-08` | the period in progress | Which window |
+| `refresh` | boolean | `false` | Rebuild a period still running. No effect on a closed one |
+
+```json
+{
+  "report_type": "weekly_email_digest",
+  "status": "complete",
+  "period": {
+    "kind": "week",
+    "key": "2026-08-24",
+    "label": "24 Aug – 30 Aug 2026",
+    "start": "2026-08-24T00:00:00Z",
+    "end": "2026-08-31T00:00:00Z",
+    "is_complete": true
+  },
+  "generated_at": "2026-08-31T01:00:00Z",
+  "is_provisional": false,
+  "from_history": true,
+  "detail": null,
+  "content": { "received_count": 42, "sent_count": 7, "untriaged_count": 30 }
+}
+```
+
+`content` is the report body: the weekly-report shape for `weekly_work`, the
+digest shape for the two digests, and `{}` when `status` is `unavailable`.
+
+| Status | Meaning |
+|---|---|
+| `200` | The report, built now or read back from its snapshot |
+| `400` | The period key is not one this system can name — a week key that is not a Monday, most often |
+| `401` / `404` / `422` | The usual `X-User-ID` outcomes |
+
+Two behaviours are worth knowing before reading a number off this endpoint. A
+period that has **closed** is answered from its stored snapshot and is never
+recomputed, so a past week does not move when today's work does; `refresh` will
+not change that, by design. A digest with `status: "unavailable"` means no
+mailbox was read — `detail` says why — and is **not** the same as a period in
+which nothing arrived, which comes back `complete` with zeroes and
+`is_quiet: true`.
+
+#### `GET /reports/history`
+
+Stored reports of one type, newest period first, plus `available_periods` —
+what the calendar offers rather than what happens to be stored, so a period
+nobody has generated can still be asked for.
+
+#### `POST /reports/digests/run`
+
+Snapshots the caller's last completed week and month of email now, the same way
+the schedule does. Only ever runs for the caller. Idempotent: a period already
+recorded costs a lookup and no mailbox call.
+
+#### `GET /reports/weekly`
+
+The live work report, unchanged. Built from the caller's current tasks and
+meetings every time, with nothing stored — this is the endpoint the interactive
+weekly screen uses.
+
 ### `GET /health`, `GET /`
 
 Liveness probe and service information.
@@ -546,6 +680,11 @@ Set in `backend/.env`; see [`.env.example`](.env.example) for the full list with
 | `MAX_MEMORIES_IN_CONTEXT` | `8` | Active memories that may shape one answer |
 | `PERSONA_CONTEXT_MAX_CHARS` | `2000` | Ceiling on the profile and memory block, taken out of `CHAT_CONTEXT_MAX_CHARS` |
 | `LLM_PROVIDER`, `LLM_MODEL` | `openrouter`, `openai/gpt-oss-20b` | Completions only; not used by ingestion |
+| `REPORT_DIGEST_SCHEDULE_ENABLED` | `false` | Snapshot each user's last completed week and month of email on a timer |
+| `REPORT_DIGEST_INTERVAL_SECONDS` | `3600` | How often that job *checks*. A period already recorded costs one query and no mailbox call |
+| `BOOTSTRAP_ADMIN_EMAIL` | unset | Who becomes administrator when nobody is one. Unset promotes the earliest-created user |
+| `EMAIL_INBOX_PAGE_SIZE` | `50` | Messages in one inbox page |
+| `EMAIL_INBOX_MAX_PAGE_SIZE` | `200` | The most one request may ask for, so a page cannot become a crawl |
 
 Every setting has a working default, so the application and its tests import without a `.env` present.
 
@@ -561,33 +700,141 @@ registrations → New registration). Note the *Application (client) ID* and
 *Directory (tenant) ID*.
 
 **2. Grant application permissions.** Under API permissions, add Microsoft
-Graph → **Application** permissions (not Delegated) → `Files.Read.All`, plus
-`Sites.Read.All` if the folders live in a SharePoint document library. Then
+Graph → **Application** permissions (not Delegated) → `Files.Read.All`. Then
 **Grant admin consent** — without it every Graph call returns `403`, and the
 error this application raises will say so.
+
+`Files.Read.All` is the whole requirement for reading files. As an
+*application* permission it is defined as "read files in all site collections",
+which includes SharePoint document libraries and every user's OneDrive for
+Business. `Sites.Read.All` is a different permission governing the `/sites`
+discovery endpoints, and this application does not call them — granting it does
+not widen file access and will not fix a `403` on a drive.
 
 **3. Create a client secret** and copy the value immediately; it is shown once.
 
 **4. Find the drive id.** For a person's OneDrive,
 `GET /users/{user-principal-name}/drive`; for a SharePoint library,
-`GET /sites/{site-id}/drives`. Graph Explorer is the easiest way to run these.
+`GET /sites/{site-id}/drives`. Or ask the application to do it, which needs no
+Graph Explorer session:
+
+```bash
+cd backend
+python -m scripts.discover_onedrive_sources --user someone@example.com
+python -m scripts.discover_onedrive_sources --drive <drive-id>          # top-level folders
+```
 
 **5. Fill in `.env`** — `ONEDRIVE_TENANT_ID`, `ONEDRIVE_CLIENT_ID`,
-`ONEDRIVE_CLIENT_SECRET`, `ONEDRIVE_DRIVE_ID`.
+`ONEDRIVE_CLIENT_SECRET`, `ONEDRIVE_DRIVE_ID`. The secret is never logged, never
+returned by any endpoint, and must never be committed.
 
-**6. Configure the folders.** `ONEDRIVE_SOURCES` is a JSON array on one line.
-Each entry needs a stable `key` and either a `path` or an `item_id`:
+**6. Configure the folders.** `ONEDRIVE_SOURCES` is a JSON array on one line,
+and it is the *only* place a folder is named — nothing in application code
+knows about any particular folder, so a sixth source is this line and a
+restart.
 
 ```
-ONEDRIVE_SOURCES=[{"key":"capabilities","path":"Capabilities"},{"key":"case-studies","path":"Capabilities/2024 and Earlier/Case Study"}]
+ONEDRIVE_SOURCES=[{"key":"capabilities","label":"Capabilities","path":"Documents/Capabilities"},{"key":"case-study","label":"Case Study","path":"Documents/Capabilities/2024 and Earlier/Case Study"}]
 ```
 
-The `key` is what sync state is stored against, so changing one orphans its
-delta token and forces a full resynchronisation. Prefer `item_id` once you know
-it — `GET /sync/onedrive/status` reports the resolved id after the first run —
-because a path stops being correct the moment somebody renames a parent folder.
+| Field | Required | Notes |
+|---|---|---|
+| `key` | yes | Stable identity. Sync state and the delta token are stored against it, so renaming one forces a full resync. Duplicates are rejected. |
+| `label` | no | What a person sees. Defaults to the path. |
+| `drive_id` | no | Falls back to `ONEDRIVE_DRIVE_ID`. |
+| `path` | one of | Folder path from the drive root. |
+| `item_id` | one of | The folder's Graph id. Preferred once known. |
+| `uri` | no | Human-facing link, shown on the status screen. Never used to address Graph. |
+| `share_url` | one of | A sharing link, resolved by Graph. The route for a folder whose drive nobody knows. |
+| `enabled` | no | `false` pauses a source without deleting it. Its delta token survives, so re-enabling resumes rather than re-indexing. Must be a JSON boolean. |
 
-**7. Run the first synchronisation.** It is a full enumeration: every supported
+### Folders that arrived as a sharing link
+
+A folder shared from another site, or from somebody else's OneDrive, has a
+drive id nobody has written down — so there is no path to configure. Configure
+the link instead:
+
+```
+{"key":"capabilities","label":"Capabilities","share_url":"https://…"}
+```
+
+Graph resolves it through `/shares/{token}/driveItem`, where the token is the
+**whole URL** base64url-encoded. That is the opposite of decoding the id that
+appears inside a sharing URL: the link is passed through unexamined, and the
+`drive_id` and `item_id` are read out of Graph's reply. Resolution runs on the
+sync path too, so a configured link needs no separate pinning step before its
+first run.
+
+A shortened `1drv.ms` link is **followed first**, because `/shares` is told a
+URL and a short link is a redirect rather than the URL of anything. Following
+it also settles the question that decides everything else — which service holds
+the content:
+
+| Destination host | What it is | Reachable app-only? |
+|---|---|---|
+| `tenant.sharepoint.com` | SharePoint document library | Yes, with `Files.Read.All` |
+| `tenant-my.sharepoint.com` | A person's OneDrive for Business | Yes, with `Files.Read.All` |
+| `onedrive.live.com` | A **consumer** Microsoft account | **No — and no permission can change that** |
+
+An application token is issued by a tenant and has authority only inside it. A
+consumer OneDrive belongs to a personal Microsoft account that is in no tenant,
+so no consent granted to this application reaches it; the resolver reports that
+as `outside_tenant` without asking Graph, because the `403` Graph would return
+is indistinguishable from a missing permission and sends people granting
+permissions that cannot help. `access_denied` (in-tenant, not consented) and
+`not_found` (a wrong path) are reported as separate verdicts for the same
+reason.
+
+A **shortcut** to a shared folder — what "Add shortcut to My files" leaves in
+somebody's own drive — is followed to its target automatically through the
+item's `remoteItem`. The stub has no children and no delta of its own, so a
+sync pointed at the stub's id would find an empty folder and report success.
+
+For the SunRadia deployment the five folders are, on one line:
+
+```
+ONEDRIVE_SOURCES=[{"key":"cftc-dq-da","label":"CFTC / DQ-DA","path":"Documents/CFTC/DQ-DA/Final Submission Apr 29th 2024"},{"key":"amtrack-aws-migration","label":"Amtrack / AWS Migration","path":"Documents/Amtrack/AWS - Migration/Final/Submission folder"},{"key":"case-study","label":"Case Study","path":"Documents/Capabilities/2024 and Earlier/Case Study"},{"key":"freddie-mac-2026","label":"Freddie Mac 2026","path":"Documents/Freddie Mac 2026"},{"key":"capabilities","label":"Capabilities","path":"Documents/Capabilities"}]
+```
+
+Five entries, not six: the Amtrack folder was listed twice in the original
+brief, and two entries for one folder would either collide on their key — which
+`load_sources` refuses — or race each other for the same documents under two
+delta tokens. Note also that `case-study` sits inside `capabilities`; that is
+allowed and costs nothing, because a file already indexed under its own
+`onedrive:{drive_id}:{item_id}` identity is `unchanged` on the second pass
+rather than a duplicate.
+
+**7. Diagnose, if anything is not where it was expected.** One command
+resolves every source, says exactly why each one failed, and — for a known
+drive — lists its root and searches it for each configured folder name, which
+is what separates "the path is wrong" from "the folder is one level deeper":
+
+```bash
+cd backend
+python -m scripts.discover_onedrive_sources --diagnose
+```
+
+**8. Pin the folders to ids.** A path is correct only until somebody renames a
+parent folder; an id survives that. Ask Graph where each configured folder is
+and paste the result back:
+
+```bash
+cd backend
+python -m scripts.discover_onedrive_sources --resolve
+```
+
+It prints one block per source and then a complete `ONEDRIVE_SOURCES` line with
+`drive_id` and `item_id` filled in. Sources it could not resolve are reported
+with the reason and left out of that line, and the command exits non-zero — so
+it also works as a deployment check. **No id is ever derived from a sharing
+URL.** Every id it prints came from Graph answering a question about a path,
+which is the difference between the right folder and a folder that looks right.
+
+Resolution is optional: `POST /sync/onedrive` resolves a path on first contact
+and stores the ids it got. Doing it ahead of time means a misspelled folder is
+found at configuration time rather than at three in the morning.
+
+**9. Run the first synchronisation.** It is a full enumeration: every supported
 file is downloaded, ingested and embedded, so expect it to take a while and to
 cost embedding calls.
 
@@ -596,13 +843,57 @@ curl -X POST localhost:8000/sync/onedrive -d '{}' -H 'Content-Type: application/
 curl localhost:8000/sync/onedrive/status
 ```
 
-Start with one folder to check the credentials and the path before pointing it
-at the whole corpus.
+Start with one folder — `-d '{"source":"capabilities"}'` — to check the
+credentials and the path before pointing it at the whole corpus. Re-running is
+safe: a file whose content has not changed is skipped, not re-embedded.
 
-**8. Optionally enable the periodic run** with `ONEDRIVE_SYNC_ENABLED=true` and
+**10. Optionally enable the periodic run** with `ONEDRIVE_SYNC_ENABLED=true` and
 `ONEDRIVE_SYNC_INTERVAL_SECONDS`. It runs incrementally, asking Graph only for
 what changed. Read the single-worker caveat in
 [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) first.
+
+### What synchronisation does
+
+| In OneDrive | In the knowledge base |
+|---|---|
+| A new file | Downloaded, parsed, chunked, embedded, indexed |
+| A file whose content changed | The old document's chunks are replaced; the old text stops being retrievable |
+| A file edited only in its metadata | Nothing. Content identity is Graph's `cTag`, so a description edit costs no embeddings |
+| A file renamed or moved | Re-indexed in place. Identity is `onedrive:{drive_id}:{item_id}`, never the name or path |
+| A deleted file | Its document and chunks are removed, so it stops appearing in answers |
+| An unsupported format | Reported as `unsupported` with a reason. Never silently dropped |
+| A file above the size limit | Reported as `unsupported` and not downloaded |
+| A file that failed to download | Reported as `failed`; the run is `partial` and **the delta token does not advance**, so the next run tries again |
+
+Supported formats are PDF, DOCX, PPTX, TXT and Markdown — the same list manual
+upload accepts, because both paths call `ingestion_service.ingest_file`. There
+is no second ingestion pipeline and no OneDrive-specific retriever: a synced
+document and an uploaded one are indistinguishable to search, chat and
+citation.
+
+**How incremental sync works.** Graph's delta API returns only what changed
+since an opaque token. The token is stored per source and is advanced **only
+after** every file in the window has been dealt with. A transient failure — a
+download that did not complete, Graph returning a 500 — holds it back, because
+a token is a promise that everything before it has been seen, and a false
+promise would bury that file until it happened to change again. If Graph
+refuses a token as too old (`410 resyncRequired`), the run falls back to a full
+enumeration automatically; that is idempotent, so the cost is time rather than
+duplicated documents.
+
+Throttling is Graph telling us the rate, not a failure: `429`, `503` and `504`
+are retried with `Retry-After` honoured, up to a ceiling. One source failing
+never stops the others, and two runs over the same source cannot overlap — the
+claim is made in the database, so a scheduled run and a manual one cannot race.
+
+### What still needs a tenant administrator
+
+Nothing in this repository can grant itself access. A deployment needs, from
+somebody with the rights to give it: an Entra application, the **application**
+permission `Files.Read.All` (plus `Sites.Read.All` for SharePoint libraries),
+**admin consent** for those permissions, and a client secret. Until consent is
+granted every Graph call returns `403`, and the error this application raises
+says exactly that rather than presenting it as a bug.
 
 ## Project structure
 
