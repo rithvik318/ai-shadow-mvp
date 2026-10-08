@@ -1,3 +1,4 @@
+from app.models.activity_report import ActivityReport, ActivityReportStatus
 from app.models.calendar import AttendanceEvidence, CalendarEvent, EventStatus
 from app.models.digital_twin import (
     DigitalTwinMemory,
@@ -31,6 +32,8 @@ from app.models.task import Task, TaskPriority, TaskStatus
 from app.models.user import User
 
 __all__ = [
+    "ActivityReport",
+    "ActivityReportStatus",
     "AttendanceEvidence",
     "CalendarEvent",
     "DigitalTwinMemory",

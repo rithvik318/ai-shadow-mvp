@@ -21,10 +21,14 @@ inferred list of projects — inferring "Tech Park" from a set of subject lines
 is a guess, and a guess in a report signed by a person is that person's problem.
 The section says what the grouping is so nobody reads more into it.
 
-**Absent sections are absent, not empty.** A period with no calendar data has
-no calendar section and says the calendar was unavailable; a period with no
-risks has no risks section rather than a heading over the word "None". A report
-padded to a fixed shape trains its reader to skim.
+**Absent sections are absent, not empty.** A period with no risks has no risks
+section rather than a heading over the word "None". A report padded to a fixed
+shape trains its reader to skim.
+
+The calendar is the exception that proves the rule, and it has three states
+rather than two: not read, read and empty, and read with meetings in it. A
+week with no meetings and a week with no calendar are different facts, and
+collapsing them would let an unread calendar read as a free week.
 """
 
 from __future__ import annotations
@@ -35,7 +39,10 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
+from app.models.calendar import CalendarEvent
 from app.models.task import Task
+from app.services.features.calendar import event_service, import_service
+from app.services.features.calendar.attendance import EventStatus
 from app.services.features.reports.digest_service import EmailDigest
 from app.services.features.reports.period import Period
 from app.services.features.tasks import task_service
@@ -48,9 +55,15 @@ from app.services.features.tasks.urgency import TaskStatus
 SECTION_LIMIT = 6
 
 CALENDAR_UNAVAILABLE = (
-    "Calendar activity was not available for this period: the Microsoft Graph "
-    "application has no calendar consent, so no meetings are imported. Nothing "
-    "here is inferred from email in their place."
+    "Calendar activity was not available for this period: no meetings have "
+    "been imported from a provider. Nothing here is inferred from email in "
+    "their place. GET /calendar/status says whether the Microsoft Graph "
+    "application has calendar consent for this mailbox."
+)
+
+CALENDAR_QUIET = (
+    "No meetings fell in this period. The calendar was read, so this is an "
+    "empty week rather than a missing one."
 )
 
 
@@ -318,6 +331,50 @@ def _risks(*, outstanding: list[Task], now: datetime) -> Section:
     )
 
 
+def _calendar(events: list[CalendarEvent], *, imported: bool) -> Section:
+    """What actually happened in the diary, and nothing about attendance.
+
+    Three states, kept apart on purpose. Nothing imported is *unavailable* —
+    the calendar was not read. Imported but empty is *quiet* — it was read and
+    the week was free. Otherwise the meetings are listed, each with what is
+    known about whether the person went, which for an unanswered past meeting
+    is "not recorded" rather than a guess.
+    """
+
+    if not imported:
+        return Section(title="Calendar", note=CALENDAR_UNAVAILABLE)
+
+    if not events:
+        return Section(title="Calendar", note=CALENDAR_QUIET)
+
+    return Section(
+        title="Calendar",
+        lines=[
+            Line(event.title, _meeting_detail(event))
+            for event in events[:SECTION_LIMIT]
+        ],
+    )
+
+
+def _meeting_detail(event: CalendarEvent) -> str:
+    """When it was, and what is known about attendance — never a guess.
+
+    A meeting still `scheduled` after it has passed means nobody answered, and
+    that is what this says. Reading "invitation accepted" as "attended" is the
+    assumption the whole calendar feature is arranged to refuse.
+    """
+
+    when = f"{event.starts_at:%d %b, %H:%M}"
+
+    if event.status is EventStatus.ATTENDED:
+        return f"{when} · attended"
+
+    if event.status is EventStatus.MISSED:
+        return f"{when} · missed"
+
+    return f"{when} · attendance not recorded"
+
+
 def _bottom_line(
     *,
     digest: EmailDigest | None,
@@ -399,7 +456,12 @@ def build(
         _requires_follow_up(outstanding=outstanding, digest=digest, now=as_of),
         _completed_work(completed),
         _risks(outstanding=outstanding, now=as_of),
-        Section(title="Calendar", note=CALENDAR_UNAVAILABLE),
+        _calendar(
+            event_service.list_events(
+                db, user_id=user_id, since=period.start, until=period.end
+            ),
+            imported=import_service.has_imported_events(db, user_id=user_id),
+        ),
         _bottom_line(
             digest=digest, completed=completed, outstanding=outstanding, now=as_of
         ),

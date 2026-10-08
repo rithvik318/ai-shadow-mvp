@@ -12,12 +12,15 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.api import report_routes
 from app.models.report import ReportStatus, ReportType
 from app.models.task import Task
 from app.models.user import User
 from app.services.features.reports import report_store
 from app.services.features.reports.period import current, month_of, week_of
 from app.services.features.tasks.urgency import TaskPriority, TaskStatus
+from tests.support.email import RecordingProvider
+from tests.support.email import message as provider_message
 
 NOW = datetime.now(UTC)
 LAST_WEEK = week_of(NOW - timedelta(days=7))
@@ -705,3 +708,184 @@ class TestHistoryIsShort:
 
         assert body["items"] == []
         assert body["total"] == 0
+
+
+# --- the detailed activity report ----------------------------------------
+#
+# The endpoint that replaces a count-based summary with an evidence-based
+# report. It takes dates rather than a period key because "this month so far"
+# is not a calendar period and cannot be named by one.
+
+
+def test_an_activity_report_needs_a_mailbox_and_says_so(
+    client: TestClient, user_headers: dict[str, str]
+) -> None:
+    """Refused in words rather than answered with an empty report.
+
+    Zero messages would assert that a mailbox was read and held nothing.
+    """
+
+    response = client.get("/reports/activity", headers=user_headers)
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "EmailProviderNotConfiguredError"
+    assert "No mailbox is connected" in response.json()["detail"]
+
+
+def test_an_activity_report_rejects_a_period_that_ends_before_it_starts(
+    client: TestClient, user_headers: dict[str, str]
+) -> None:
+    response = client.get(
+        "/reports/activity",
+        params={"start": "2026-09-13", "end": "2026-09-01"},
+        headers=user_headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "ReportPeriodError"
+
+
+def test_an_activity_report_requires_identity(client: TestClient) -> None:
+    assert client.get("/reports/activity").status_code == 401
+
+
+# --- the detailed activity report, with a mailbox actually connected ------
+#
+# The tests above this line stop at 409 and 400, both of which return before
+# the pipeline is reached. That gap is why a reference to a setting that does
+# not exist shipped in the generation call and was only found in the browser:
+# a suite of 1,608 tests never executed the line. These run the endpoint all
+# the way through a stub mailbox, which is the only way this route's body is
+# covered at all.
+
+
+def _connect_mailbox(
+    monkeypatch: pytest.MonkeyPatch, provider: object, *, address: str
+) -> None:
+    """Point the route at a stub provider, at the mailbox boundary.
+
+    Patched here rather than at `_mailbox_for`, so the route's own resolution,
+    its 409 and the provider call it makes are all still under test.
+    """
+
+    monkeypatch.setattr(
+        report_routes.mailbox_config_service,
+        "resolve_address",
+        lambda db, *, user_id: address,
+    )
+    monkeypatch.setattr(
+        report_routes.mailbox_config_service,
+        "provider_for",
+        lambda db, *, user_id: provider,
+    )
+
+
+class TestActivityReportWithAMailbox:
+    MAILBOX = "owner@sunradia.com"
+
+    def _provider(self) -> RecordingProvider:
+        inside = NOW - timedelta(days=2)
+
+        return RecordingProvider(
+            messages=[
+                provider_message(
+                    message_id="in-1",
+                    thread_id="thread-1",
+                    sender="client@acme.example",
+                    subject="Revised delivery schedule",
+                    body="Can you confirm the new milestone dates by Friday?",
+                    received_at=inside,
+                ),
+                provider_message(
+                    message_id="out-1",
+                    thread_id="thread-1",
+                    sender=self.MAILBOX,
+                    subject="RE: Revised delivery schedule",
+                    body="Confirmed — the revised dates are attached.",
+                    received_at=inside + timedelta(hours=3),
+                    folder="sentitems",
+                ),
+            ]
+        )
+
+    def test_a_connected_mailbox_produces_a_report(
+        self,
+        client: TestClient,
+        user_headers: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The whole route body, executed.
+
+        Before the fix this raised `AttributeError: 'Settings' object has no
+        attribute 'LLM_API_KEY'` from the generation call and the endpoint
+        answered 500.
+        """
+
+        _connect_mailbox(monkeypatch, self._provider(), address=self.MAILBOX)
+
+        response = client.get(
+            "/reports/activity",
+            params={
+                "start": (NOW - timedelta(days=6)).date().isoformat(),
+                "end": NOW.date().isoformat(),
+            },
+            headers=user_headers,
+        )
+
+        assert response.status_code == 200, response.text
+
+        body = response.json()
+
+        assert body["messages_analysed"] == 2
+        assert body["markdown"].strip()
+        assert body["sections"]
+
+    def test_the_sent_folder_is_read_as_well_as_the_inbox(
+        self,
+        client: TestClient,
+        user_headers: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A report that reads only the inbox cannot say what the owner did.
+
+        The previous code looked for a `list_sent_messages` method, which no
+        provider has and the `EmailProvider` protocol does not declare, so
+        every live report described one half of a conversation.
+        """
+
+        provider = self._provider()
+        _connect_mailbox(monkeypatch, provider, address=self.MAILBOX)
+
+        response = client.get(
+            "/reports/activity",
+            params={
+                "start": (NOW - timedelta(days=6)).date().isoformat(),
+                "end": NOW.date().isoformat(),
+            },
+            headers=user_headers,
+        )
+
+        assert response.status_code == 200, response.text
+
+        # The inbox holds one of these two messages; the sent folder holds the
+        # other. A count of one is a report written from half the evidence.
+        assert response.json()["messages_analysed"] == 2
+
+    def test_no_model_configured_still_answers(
+        self,
+        client: TestClient,
+        user_headers: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With no credentials the report is structural, not an error.
+
+        `narrative` says which it is, so the UI can tell a deterministic report
+        from a model-written one instead of the reader guessing.
+        """
+
+        _connect_mailbox(monkeypatch, self._provider(), address=self.MAILBOX)
+
+        response = client.get("/reports/activity", headers=user_headers)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["narrative"] is False

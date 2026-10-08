@@ -189,9 +189,23 @@ class EmailProvider(Protocol):
         """
 
     def list_messages(
-        self, *, limit: int = 25, folder: str | None = None
+        self,
+        *,
+        limit: int = 25,
+        folder: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[EmailMessage]:
-        """Recent messages, newest first."""
+        """Recent messages, newest first.
+
+        `since` (inclusive) and `until` (exclusive) bound the window a caller
+        wants. They exist because the alternative is what the reporting path
+        used to do: ask for the newest messages and discard everything outside
+        the period — which downloads a mailbox to describe a fortnight of it,
+        and silently returns nothing at all for a period further back than the
+        page size reaches. A provider that cannot filter server-side may filter
+        after fetching, but must not ignore them.
+        """
 
     def get_message(self, message_id: str) -> EmailMessage:
         """One message, with its body."""

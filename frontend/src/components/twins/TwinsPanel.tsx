@@ -22,7 +22,12 @@ interface TwinCounts {
 
 export function TwinsPanel() {
   const { twins, currentTwin, loading, error, select, refresh, create } = useTwins();
-  const [openTwin, setOpenTwin] = useState<User | null>(null);
+  // The id, and the twin looked up from the list — not a copy of the twin
+  // taken when it was opened. A profile save renames the user record, and a
+  // held copy would go on showing the old name in the workspace header for as
+  // long as it stayed open, which reads as the save not having worked.
+  const [openTwinId, setOpenTwinId] = useState<string | null>(null);
+  const openTwin = twins.find((twin) => twin.id === openTwinId) ?? null;
   const [deleting, setDeleting] = useState<User | null>(null);
   const [adding, setAdding] = useState(false);
   const [counts, setCounts] = useState<Record<string, TwinCounts>>({});
@@ -71,7 +76,7 @@ export function TwinsPanel() {
         isActive={openTwin.id === currentTwin?.id}
         onMakeActive={() => select(openTwin.id)}
         onBack={() => {
-          setOpenTwin(null);
+          setOpenTwinId(null);
           void loadCounts(twins);
         }}
       />
@@ -151,7 +156,7 @@ export function TwinsPanel() {
                   </p>
 
                   <div className="mt-3.5 flex flex-wrap gap-2">
-                    <Button type="button" onClick={() => setOpenTwin(twin)}>
+                    <Button type="button" onClick={() => setOpenTwinId(twin.id)}>
                       Open Twin
                     </Button>
                     {twin.id === currentTwin?.id ? null : (

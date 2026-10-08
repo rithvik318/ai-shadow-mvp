@@ -35,10 +35,18 @@ from enum import StrEnum
 
 
 class PeriodKind(StrEnum):
-    """The two rhythms reports are generated on."""
+    """The rhythms reports are generated on.
+
+    `RANGE` is the open one and exists because the other two cannot express a
+    period that has not finished. "September so far" is neither a week nor a
+    month: it starts where a month starts and ends today, and forcing it into
+    `MONTH` would label a partial period as a complete one — which is the
+    difference between "the month was quiet" and "the month is not over".
+    """
 
     WEEK = "week"
     MONTH = "month"
+    RANGE = "range"
 
 
 @dataclass(frozen=True, order=True)
@@ -80,6 +88,37 @@ class Period:
         return f"{first_day} {self.start:%b} – {last_day} {last:%b %Y}"
 
     @property
+    def is_partial(self) -> bool:
+        """Whether this window stops short of the calendar period it sits in.
+
+        True for "1–13 September" and false for "September". A report must say
+        which it is: a reader who takes a month-to-date figure for a whole
+        month draws a conclusion the data does not support, and no amount of
+        detail elsewhere in the document corrects that.
+        """
+
+        if self.kind is not PeriodKind.RANGE:
+            return False
+
+        # Bounds only, never `kind`: a range covering exactly one calendar
+        # month is that month, and comparing the dataclasses would call it
+        # partial purely because one carries RANGE and the other MONTH.
+        enclosing = month_of(self.start)
+
+        if (self.start, self.end) == (enclosing.start, enclosing.end):
+            return False
+
+        week = week_of(self.start)
+
+        return (self.start, self.end) != (week.start, week.end)
+
+    @property
+    def days(self) -> int:
+        """Whole days covered, rounded up. One for anything shorter."""
+
+        return max(1, -(-int((self.end - self.start).total_seconds()) // 86_400))
+
+    @property
     def key(self) -> str:
         """A stable identity for this window, for a URL or a log line.
 
@@ -89,6 +128,12 @@ class Period:
 
         if self.kind is PeriodKind.MONTH:
             return f"{self.start:%Y-%m}"
+
+        if self.kind is PeriodKind.RANGE:
+            # Both ends, because a range is not identified by its start: two
+            # reports can begin on the 1st and cover different windows.
+            last = (self.end - timedelta(seconds=1)).date()
+            return f"{self.start:%Y-%m-%d}..{last:%Y-%m-%d}"
 
         return f"{self.start:%Y-%m-%d}"
 
@@ -194,3 +239,60 @@ def parse_key(kind: PeriodKind, key: str) -> Period:
         )
 
     return week
+
+
+def range_between(start: datetime, end: datetime) -> Period:
+    """An arbitrary window, `start` inclusive and `end` exclusive."""
+
+    first, last = _as_utc(start), _as_utc(end)
+
+    if last <= first:
+        raise ValueError("A reporting period must end after it starts.")
+
+    return Period(kind=PeriodKind.RANGE, start=first, end=last)
+
+
+def to_date(kind: PeriodKind, moment: datetime | None = None) -> Period:
+    """The current week or month up to `moment`, and no further.
+
+    What "September so far" resolves to. Deliberately a `RANGE` even though it
+    begins where a month begins: the window is not the month, and a report that
+    called it one would be describing thirteen days under a heading that
+    promises thirty.
+
+    The end is `moment` itself rather than the end of today, so a report
+    generated at nine in the morning does not claim to cover the afternoon.
+    """
+
+    now = _as_utc(moment)
+    enclosing = week_of(now) if kind is PeriodKind.WEEK else month_of(now)
+
+    return Period(kind=PeriodKind.RANGE, start=enclosing.start, end=now)
+
+
+def split_into_weeks(period: Period) -> list[Period]:
+    """Cut a period into consecutive week-long segments, the last one short.
+
+    The month-to-date report's backbone. A thirteen-day window becomes 1–7 and
+    8–13, a full September becomes four weeks and a two-day tail, and February
+    becomes four exactly — no month is special-cased and nothing is hardcoded.
+
+    Segments are cut from the period's own start rather than snapped to
+    Mondays. Snapping would make the first segment of a month report cover days
+    before the month began, which is a window the report is not allowed to
+    describe. A period of a week or less is one segment: splitting it would
+    produce a "week 1" identical to the report it sits in.
+    """
+
+    if period.end - period.start <= timedelta(days=7):
+        return [period]
+
+    segments: list[Period] = []
+    cursor = period.start
+
+    while cursor < period.end:
+        segment_end = min(cursor + timedelta(days=7), period.end)
+        segments.append(Period(kind=PeriodKind.RANGE, start=cursor, end=segment_end))
+        cursor = segment_end
+
+    return segments

@@ -8,12 +8,14 @@ a question of when to call this, not of what it would say.
 
 Three things this deliberately does not do.
 
-**It does not invent a calendar.** Calendar access is unavailable — Graph
-returns 403 for `Calendars.Read` on the configured application — so the report
-carries `calendar_connected: False` and an empty event list. It never
-substitutes email-derived dates for meetings, and it never says a meeting was
-attended or missed. When consent is granted the events section gains a source;
-nothing else about this module has to change.
+**It does not invent a calendar.** `calendar_connected` is answered from the
+rows: true once meetings have actually been imported from a provider for this
+person, false while every event on the screen was typed in by hand. That is a
+question the database can answer, which is what keeps this function offline and
+deterministic — asking Graph here would put a network call, and a 403, inside a
+report. `POST /calendar/import` is where the reading happens. The report never
+substitutes email-derived dates for meetings, and never says a meeting was
+attended or missed.
 
 **It does not decide colours.** It emits `urgency` — normal, warning, critical
 — and the frontend maps those to its theme. A palette here would be a design
@@ -34,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from app.models.calendar import CalendarEvent
 from app.models.task import Task
-from app.services.features.calendar import event_service
+from app.services.features.calendar import event_service, import_service
 from app.services.features.calendar.attendance import EventVerdict
 from app.services.features.tasks import task_service
 from app.services.features.tasks.escalation import (
@@ -51,6 +53,19 @@ from app.services.features.tasks.urgency import (
 #: Kept as an alias so existing callers and tests keep working. The wording now
 #: lives in `tasks/escalation.py`, next to the rules that decide it.
 NO_ESCALATION_CONTACT = NO_TARGET_IDENTIFIED
+
+NO_CALENDAR_DETAIL = (
+    "Calendar: nothing has been imported. Any events shown here were entered "
+    "by hand, and nothing about attendance is inferred. Connect a mailbox and "
+    "import a window with POST /calendar/import; GET /calendar/status says "
+    "whether the Microsoft Graph application has calendar consent."
+)
+
+CALENDAR_CONNECTED_DETAIL = (
+    "Calendar: meetings have been imported from Microsoft Graph. Attendance is "
+    "still never inferred — a meeting that has passed with nobody's answer "
+    "reads as unknown until somebody records one."
+)
 
 
 @dataclass(frozen=True)
@@ -146,15 +161,13 @@ class WeeklyReport:
     overdue_count: int = 0
     escalation_count: int = 0
 
-    #: Whether a calendar *provider* is connected. False today: the Graph
-    #: application has no calendar consent. Events may still be present —
-    #: entered by hand — and this flag says where they did **not** come from.
+    #: Whether meetings have actually arrived from a calendar provider for this
+    #: person. Events may be present either way — entered by hand — and this
+    #: flag says where they did, or did not, come from. It defaults to the
+    #: unconnected answer so nothing constructing a report by hand claims a
+    #: calendar it does not have.
     calendar_connected: bool = False
-    calendar_detail: str = (
-        "Calendar: no provider connected. The Microsoft Graph application does "
-        "not have calendar access, so no meetings are imported. Events shown "
-        "here were entered by hand, and nothing about attendance is inferred."
-    )
+    calendar_detail: str = NO_CALENDAR_DETAIL
 
 
 def _existed_by(task: Task, moment: datetime) -> bool:
@@ -347,9 +360,15 @@ def build_weekly_report(
         )
     ]
 
+    # Answered from rows, not from Graph: this function stays offline and
+    # deterministic, and a report is not the place to discover a 403.
+    imported = import_service.has_imported_events(db, user_id=user_id)
+
     return WeeklyReport(
         user_id=user_id,
         generated_at=moment,
+        calendar_connected=imported,
+        calendar_detail=(CALENDAR_CONNECTED_DETAIL if imported else NO_CALENDAR_DETAIL),
         period_start=since,
         period_end=period_end if period_end is not None else horizon,
         events=events,

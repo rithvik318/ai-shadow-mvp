@@ -236,7 +236,44 @@ def test_the_report_states_that_the_calendar_is_not_connected(
 
     assert body["calendar_connected"] is False
     assert body["events"] == []
-    assert "no provider connected" in body["calendar_detail"].lower()
+    assert "nothing has been imported" in body["calendar_detail"].lower()
+
+
+def test_the_calendar_status_endpoint_answers_instead_of_failing(
+    client: TestClient, user_headers: dict
+) -> None:
+    """ "It cannot be read" is the useful answer, so it is a 200 and not a 503.
+
+    A screen that has to catch an exception to render the reason will
+    eventually not, and the reason is the whole point of the endpoint.
+    """
+
+    response = client.get("/calendar/status", headers=user_headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["connected"] is False
+    assert body["has_imported_events"] is False
+    assert body["detail"]
+
+
+def test_importing_without_a_mailbox_is_refused_not_reported_as_empty(
+    client: TestClient, user_headers: dict
+) -> None:
+    """503, because the request was fine and the deployment cannot serve it.
+
+    An empty result would be indistinguishable from a genuinely free week, and
+    a report built on it would be claiming a calendar was read.
+    """
+
+    response = client.post(
+        "/calendar/import",
+        json={"since": _in(-7), "until": _in(7)},
+        headers=user_headers,
+    )
+
+    assert response.status_code == 503
+    assert "mailbox" in response.json()["detail"].lower()
 
 
 def test_an_escalation_says_no_contact_is_configured(

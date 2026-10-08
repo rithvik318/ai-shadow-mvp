@@ -32,7 +32,7 @@ from app.config.settings import settings
 from app.core.exceptions import SyncError
 from app.services.features.sync import source_resolver
 from app.services.features.sync.source_config import load_sources
-from app.services.graph import drive_service
+from app.services.graph import drive_service, drive_url
 from app.services.graph.client import GraphClient
 
 
@@ -243,6 +243,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--user", help="User principal name, for their OneDrive")
+    group.add_argument(
+        "--url",
+        help=(
+            "A OneDrive or SharePoint web address, as copied from a browser. "
+            "Prints the source entry it implies. Offline — asks Graph nothing."
+        ),
+    )
     group.add_argument("--site", help="SharePoint site, as hostname:/sites/Name")
     group.add_argument("--drive", help="A known drive id, to enumerate folders in")
     group.add_argument(
@@ -264,6 +271,26 @@ def main() -> int:
         help="With --drive: a folder path to walk and count files in",
     )
     arguments = parser.parse_args()
+
+    if arguments.url:
+        # Deliberately before the client is built. Reading a URL asks Graph
+        # nothing, so it works on a machine with no credentials at all — which
+        # is where somebody usually has the URL in front of them.
+        try:
+            location = drive_url.parse(arguments.url)
+        except drive_url.UnreadableDriveUrl as exc:
+            print(f"Cannot read that address: {exc}", file=sys.stderr)
+            return 2
+
+        print()
+        print(drive_url.describe(location))
+        print()
+        print(
+            "Then confirm it resolves:  python -m scripts.discover_onedrive_sources "
+            "--resolve"
+        )
+
+        return 0
 
     try:
         # Credentials come from settings, which reads .env. Nothing is passed

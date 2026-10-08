@@ -1,3 +1,4 @@
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -94,6 +95,28 @@ class Settings(BaseSettings):
     # whether ingestion succeeds or fails, so this is never a mirror of
     # OneDrive.
     ONEDRIVE_STAGING_DIR: str | None = None
+
+    # How many files are downloaded at once, and how many are staged before
+    # ingestion runs over them.
+    #
+    # Downloads are the only part of a sync that is safe to overlap: they touch
+    # the network and the staging directory and nothing else. Parsing, chunking,
+    # embedding and every database write stay on the calling thread with the one
+    # session it was given — SQLAlchemy's `Session` is not thread-safe, and
+    # sharing one across a pool is a data-corruption bug that only appears under
+    # load.
+    #
+    # Four is deliberately modest. Graph throttles a first full sync hard, and
+    # the failure mode of too much concurrency is a storm of 429s that makes the
+    # run slower than doing it serially would have been.
+    ONEDRIVE_DOWNLOAD_CONCURRENCY: int = 4
+
+    # Files are downloaded in batches of this size and then ingested. The batch
+    # bounds two things at once: how much staging disk is in use, and how long a
+    # pre-authorised download URL sits unused before it is spent — Graph mints
+    # those with a life of about an hour, so a run must never hold one for
+    # longer than it takes to work through a batch.
+    ONEDRIVE_DOWNLOAD_BATCH_SIZE: int = 16
 
     # Periodic incremental sync. Off by default — a background job that talks
     # to a third party and writes to the knowledge base should be switched on
@@ -217,6 +240,49 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "openai/gpt-oss-20b"
     OPENAI_API_KEY: str | None = None
     OPENROUTER_API_KEY: str | None = None
+
+    # How long one model call may take, and how many times the SDK may repeat
+    # it. Both are set because the OpenAI client's defaults are wrong for a
+    # request a person is waiting on: a 600-second read timeout and two
+    # automatic retries mean a single unanswered call can hold a request for
+    # half an hour, and a report makes a dozen of them in a row. Measured
+    # against a stub provider that never answers: 18 calls became 54 HTTP
+    # attempts, each able to wait ten minutes.
+    # What the application's own loggers emit. Without this nothing configures
+    # the root logger, so every INFO line this codebase writes — including the
+    # timings and counts behind a report — was discarded, and the only trace a
+    # slow report left was a bare warning with no context around it.
+    LOG_LEVEL: str = "INFO"
+
+    LLM_TIMEOUT_SECONDS: float = 45.0
+    LLM_MAX_RETRIES: int = 1
+
+    # The whole budget for the model calls behind one activity report. When it
+    # is spent, the remaining conversations are described structurally and the
+    # report says so in its header. This is what bounds the endpoint: without
+    # it, response time is however long a provider feels like taking multiplied
+    # by the number of conversations in the period.
+    REPORT_ANALYSIS_BUDGET_SECONDS: float = 90.0
+
+    # How long a stored activity report for a period that is still running is
+    # served without checking the mailbox. A closed period is never rechecked
+    # at all — it cannot change — so this governs the current week and month
+    # only. Half an hour: long enough that opening the tab repeatedly costs
+    # nothing, short enough that today's report is today's.
+    ACTIVITY_REPORT_FRESH_SECONDS: int = 1800
+
+    # How long one generation may hold its claim before another request may
+    # take it over. Above the analysis budget plus a fetch, so a report that is
+    # simply slow is never interrupted; bounded so a process that died holding
+    # the claim does not make a window ungeneratable.
+    ACTIVITY_REPORT_LOCK_SECONDS: int = 600
+
+    # A shared secret the deployment's reverse proxy (Vercel) adds to every
+    # request as `x-origin-secret`. When set, the API refuses any request that
+    # does not carry it, so the backend's public URL cannot be called directly
+    # around the proxy. Unset means no check, which is local development.
+    # This is a perimeter, not authentication: `X-User-ID` is still trusted.
+    ORIGIN_SECRET: SecretStr | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

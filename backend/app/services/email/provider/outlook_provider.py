@@ -53,11 +53,50 @@ logger = logging.getLogger(__name__)
 PROVIDER_NAME = "outlook"
 
 # Asked for explicitly so a listing costs one round trip and returns a preview
-# rather than every body. `body` is fetched only by `get_message`.
+# rather than every body. `body` is fetched by `get_message`, and by a windowed
+# listing (the report path) — see `_WINDOW_FIELDS`.
+#: Graph's own per-call ceiling for a listing, and therefore the page size.
+MAX_PAGE_SIZE = 200
+
+
+def _graph_moment(value: datetime) -> str:
+    """A UTC instant in the form Graph's `$filter` accepts."""
+
+    moment = value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _window_filter(since: datetime | None, until: datetime | None) -> str:
+    """`since` inclusive, `until` exclusive, as an OData filter."""
+
+    clauses = []
+
+    if since is not None:
+        clauses.append(f"receivedDateTime ge {_graph_moment(since)}")
+
+    if until is not None:
+        clauses.append(f"receivedDateTime lt {_graph_moment(until)}")
+
+    return " and ".join(clauses)
+
+
 _LIST_FIELDS = (
     "id,conversationId,subject,bodyPreview,from,toRecipients,ccRecipients,"
     "receivedDateTime,hasAttachments,isRead,parentFolderId"
 )
+
+#: What a *windowed* listing asks for on top of `_LIST_FIELDS`. A windowed
+#: listing is the report path — `correspondence.from_provider` — and a report
+#: written from `bodyPreview` alone reads the first 255 characters of every
+#: message: a commitment made in the second paragraph is invisible to it.
+#: `isDraft` is asked for so an unsent draft can be left out (see below).
+_WINDOW_FIELDS = _LIST_FIELDS + ",body,isDraft"
+
+#: Page size for a windowed listing, which carries bodies. The value the
+#: collector (`scripts/collect_activity_report_data.py`) reads this tenant's
+#: mailboxes with, bodies included.
+WINDOW_PAGE_SIZE = 50
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -292,7 +331,12 @@ class OutlookEmailProvider:
         )
 
     def list_messages(
-        self, *, limit: int = 25, folder: str | None = None
+        self,
+        *,
+        limit: int = 25,
+        folder: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[EmailMessage]:
         path = (
             f"{self._base()}/mailFolders/{folder}/messages"
@@ -300,20 +344,53 @@ class OutlookEmailProvider:
             else f"{self._base()}/messages"
         )
 
-        payload = self._call(
-            path,
-            {
-                # Graph accepts up to a thousand; two hundred is this application's
-                # own ceiling, set in EMAIL_INBOX_MAX_PAGE_SIZE and repeated here
-                # because a provider must bound its own call rather than trust
-                # the caller to have done it.
-                "$top": max(1, min(limit, 200)),
-                "$select": _LIST_FIELDS,
-                "$orderby": "receivedDateTime desc",
-            },
-        )
+        params: dict[str, Any] = {
+            # Graph accepts up to a thousand; two hundred is this application's
+            # own ceiling, set in EMAIL_INBOX_MAX_PAGE_SIZE and repeated here
+            # because a provider must bound its own call rather than trust
+            # the caller to have done it.
+            "$top": max(1, min(limit, MAX_PAGE_SIZE)),
+            "$select": _LIST_FIELDS,
+            "$orderby": "receivedDateTime desc",
+        }
 
-        return [to_message(item) for item in payload.get("value", [])]
+        window = _window_filter(since, until)
+
+        if window:
+            params["$filter"] = window
+            # A windowed listing is read as evidence, so it carries bodies —
+            # and pages of bodies are kept to the size already proven on this
+            # tenant. `@odata.nextLink` repeats `$select` and `$top`, so every
+            # page below asks for the same thing.
+            params["$select"] = _WINDOW_FIELDS
+            params["$top"] = max(1, min(limit, WINDOW_PAGE_SIZE))
+
+        messages: list[EmailMessage] = []
+        payload = self._call(path, params)
+
+        while True:
+            for item in payload.get("value", []):
+                # `/messages` spans every folder, Drafts included. A draft was
+                # never sent or received, and read as evidence it becomes
+                # "inbound mail from nobody" carrying text nobody sent. Only
+                # the windowed listing drops it; the inbox view is unchanged.
+                if window and item.get("isDraft") is True:
+                    continue
+
+                messages.append(to_message(item))
+
+            # Paging only when a window was asked for. A plain listing is a
+            # screenful and one page is the answer; a report asks for a month
+            # and a single page of 200 would describe the busiest fortnight of
+            # it and call that the month.
+            following = payload.get("@odata.nextLink")
+
+            if not window or not following or len(messages) >= limit:
+                break
+
+            payload = self._call(following)
+
+        return messages[:limit]
 
     def get_message(self, message_id: str) -> EmailMessage:
         payload = self._call(

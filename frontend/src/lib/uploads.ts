@@ -33,12 +33,13 @@ export interface ResultPresentation {
 }
 
 /**
- * The five outcomes the backend distinguishes, kept distinct here too.
+ * The six outcomes the backend distinguishes, kept distinct here too.
  *
  * `unchanged` and `replaced` are successes and must not read as failures —
- * they are the ingestion layer's idempotency doing its job. `unsupported` is
- * separated from `failed` because the remedy differs: convert the file, or
- * retry it.
+ * they are the ingestion layer's idempotency doing its job. `unsupported` and
+ * `ocr_required` are each separated from `failed` because the remedy differs:
+ * convert the file, run it through OCR, or retry it. Only the last of the
+ * three is worth retrying, and only `failed` means something went wrong.
  */
 const PRESENTATION: Record<IngestionResult, ResultPresentation> = {
   indexed: {
@@ -59,6 +60,13 @@ const PRESENTATION: Record<IngestionResult, ResultPresentation> = {
   unsupported: {
     label: "Unsupported",
     description: "This file type cannot be read yet.",
+    tone: "warning",
+  },
+  ocr_required: {
+    label: "Needs OCR",
+    description:
+      "Read successfully, but the file has no text layer — it is a scan or " +
+      "an image. Text recognition is not available yet.",
     tone: "warning",
   },
   failed: {

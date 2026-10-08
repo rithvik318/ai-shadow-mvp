@@ -73,3 +73,66 @@ def test_get_llm_client_rejects_an_unknown_provider(
 
     with pytest.raises(ValueError):
         client_module.get_llm_client()
+
+
+def _client_recording(calls: list[dict], *, reject_format: bool) -> SimpleNamespace:
+    import httpx
+    from openai import BadRequestError
+
+    def create(**kwargs: object) -> SimpleNamespace:
+        calls.append(kwargs)
+
+        if reject_format and "response_format" in kwargs:
+            raise BadRequestError(
+                "unsupported",
+                response=httpx.Response(
+                    400, request=httpx.Request("POST", "https://x.test")
+                ),
+                body=None,
+            )
+
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="{}"))]
+        )
+
+    return SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+
+def test_structured_output_is_requested_with_openrouter_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+    monkeypatch.setattr(client_module.settings, "LLM_PROVIDER", "openrouter")
+    monkeypatch.setattr(
+        "app.services.llm.llm_service.get_llm_client",
+        lambda: _client_recording(calls, reject_format=False),
+    )
+    schema = {"type": "json_schema", "json_schema": {"name": "X", "schema": {}}}
+
+    assert llm_service.complete([{"role": "user", "content": "Hi"}], schema) == "{}"
+
+    assert calls[0]["response_format"] == schema
+    assert calls[0]["extra_body"] == {"provider": {"require_parameters": True}}
+
+
+def test_a_provider_that_refuses_structured_output_gets_the_plain_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asking for structure must never fail a call that would have succeeded."""
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "app.services.llm.llm_service.get_llm_client",
+        lambda: _client_recording(calls, reject_format=True),
+    )
+
+    result = llm_service.complete(
+        [{"role": "user", "content": "Hi"}],
+        {"type": "json_schema", "json_schema": {"name": "X", "schema": {}}},
+    )
+
+    assert result == "{}"
+    assert len(calls) == 2
+    assert "response_format" not in calls[1]

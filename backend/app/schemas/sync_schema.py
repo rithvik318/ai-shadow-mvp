@@ -46,6 +46,14 @@ class SyncSourceSummary(BaseModel):
     replaced: int
     deleted: int
     unsupported: int
+    ocr_required: int = Field(
+        default=0,
+        description=(
+            "Files read successfully that carry no text layer — scans. Counted "
+            "apart from `failed` because nothing went wrong with them and "
+            "retrying cannot help; the remedy is OCR."
+        ),
+    )
     failed: int
     duration_seconds: float
     delta_advanced: bool = Field(
@@ -68,6 +76,7 @@ class SyncResponse(BaseModel):
     total_unchanged: int
     total_deleted: int
     total_unsupported: int
+    total_ocr_required: int = 0
     total_failed: int
     duration_seconds: float
 
@@ -123,6 +132,7 @@ class SyncStateResponse(BaseModel):
     last_unchanged: int
     last_deleted: int
     last_unsupported: int
+    last_ocr_required: int = 0
     last_failed: int
 
 

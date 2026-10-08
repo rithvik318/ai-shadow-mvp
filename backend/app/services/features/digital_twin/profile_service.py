@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import ProfileIncompleteError, ProfileNotFoundError
 from app.models.digital_twin import DigitalTwinProfile
+from app.services.features.users import user_service
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,37 @@ def get_profile(db: Session, *, user_id: uuid.UUID) -> DigitalTwinProfile:
     return profile
 
 
+# The two fields that name the same person in two tables. `users.name` and
+# `users.role` are what the workspace displays — the twin switcher, the sidebar,
+# the report header — and `digital_twin_profile.name` and `.role` are what the
+# persona is written from. Nothing kept them in step, so editing the profile's
+# name changed the persona and left every label in the product reading the old
+# one, with no error to explain why.
+IDENTITY_FIELDS = ("name", "role")
+
+
+def _apply_to_identity(
+    db: Session, supplied: dict[str, object], *, user_id: uuid.UUID
+) -> None:
+    """Write a renamed persona back onto the user record it describes.
+
+    No commit: the caller's commit covers both rows, so a failure cannot leave
+    a user renamed with an unsaved profile.
+
+    Only fields the caller actually supplied, and only non-blank ones — the
+    same rule the profile itself follows, so a partial edit cannot blank an
+    identity that the form did not show.
+    """
+
+    user = user_service.get_user(db, user_id)
+
+    for field in IDENTITY_FIELDS:
+        value = supplied.get(field)
+
+        if isinstance(value, str) and value.strip():
+            setattr(user, field, value.strip())
+
+
 def upsert_profile(
     db: Session, values: dict[str, object], *, user_id: uuid.UUID
 ) -> DigitalTwinProfile:
@@ -76,6 +108,10 @@ def upsert_profile(
     Writes only to `user_id`'s row. The owner is an argument, never something
     the supplied values can set — `EDITABLE_FIELDS` does not contain it, so a
     request body carrying `user_id` cannot redirect the write at somebody else.
+
+    A supplied `name` or `role` is also written to that user's own record, so
+    the name the product shows and the name the persona is written from cannot
+    drift apart — see `_apply_to_identity`. Both rows are saved by one commit.
     """
 
     profile = find_profile(db, user_id=user_id)
@@ -95,6 +131,8 @@ def upsert_profile(
     else:
         for field, value in supplied.items():
             setattr(profile, field, value)
+
+    _apply_to_identity(db, supplied, user_id=user_id)
 
     db.commit()
     db.refresh(profile)

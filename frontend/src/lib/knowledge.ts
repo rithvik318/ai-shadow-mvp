@@ -70,6 +70,7 @@ export interface SourcePresentation {
   replaced: number;
   deleted: number;
   unsupported: number;
+  ocrRequired: number;
   failed: number;
   lastSucceededAt: string | null;
   lastAttemptedAt: string | null;
@@ -102,6 +103,7 @@ export function describeSyncSource(source: SyncSourceState): SourcePresentation 
     replaced: source.last_replaced,
     deleted: source.last_deleted,
     unsupported: source.last_unsupported,
+    ocrRequired: source.last_ocr_required,
     failed: source.last_failed,
     lastSucceededAt: source.last_succeeded_at,
     lastAttemptedAt: source.last_attempted_at,
@@ -114,6 +116,7 @@ export interface SyncTotals {
   synced: number;
   failing: number;
   unsupported: number;
+  ocrRequired: number;
   failed: number;
   lastSyncedAt: string | null;
 }
@@ -134,6 +137,7 @@ export function syncTotals(status: SyncStatusResponse): SyncTotals {
       (source) => source.status === "failed" || source.status === "partial",
     ).length,
     unsupported: sources.reduce((total, source) => total + source.last_unsupported, 0),
+    ocrRequired: sources.reduce((total, source) => total + source.last_ocr_required, 0),
     failed: sources.reduce((total, source) => total + source.last_failed, 0),
     // The oldest success, not the newest: the corpus is only as current as its
     // most stale folder, and showing the newest would flatter a broken source.

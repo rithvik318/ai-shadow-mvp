@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.models.user import User
+from app.services.features.calendar import event_service
 from app.services.features.reports import weekly_report_service
 from app.services.features.reports.weekly_report_service import (
     NO_ESCALATION_CONTACT,
@@ -333,7 +334,55 @@ def test_the_report_says_the_calendar_is_not_connected(
     report = build_weekly_report(db_session, user_id=test_user.id, now=NOW)
 
     assert report.calendar_connected is False
-    assert "no provider connected" in report.calendar_detail.lower()
+    assert "nothing has been imported" in report.calendar_detail.lower()
+
+
+def test_a_hand_typed_meeting_does_not_make_the_calendar_connected(
+    db_session: Session, test_user: User
+) -> None:
+    """The distinction the flag exists for.
+
+    Events on the screen do not mean a calendar was read. Reporting connected
+    here would tell a reader that the week shown is their real diary.
+    """
+
+    event_service.create_event(
+        db_session,
+        user_id=test_user.id,
+        title="Coffee with Robert",
+        starts_at=NOW + timedelta(days=1),
+    )
+
+    report = build_weekly_report(db_session, user_id=test_user.id, now=NOW)
+
+    assert len(report.events) == 1
+    assert report.calendar_connected is False
+
+
+def test_an_imported_meeting_makes_the_calendar_connected(
+    db_session: Session, test_user: User
+) -> None:
+    """A row that came from a provider is the evidence the flag reports.
+
+    Answered from the database rather than by asking Graph, which is what keeps
+    this function offline and deterministic — a report is not the place to
+    discover a 403.
+    """
+
+    event_service.create_event(
+        db_session,
+        user_id=test_user.id,
+        title="Tech Park review",
+        starts_at=NOW + timedelta(days=1),
+        source="graph",
+        provider="outlook",
+        provider_event_id="occ-1",
+    )
+
+    report = build_weekly_report(db_session, user_id=test_user.id, now=NOW)
+
+    assert report.calendar_connected is True
+    assert "attendance is still never inferred" in report.calendar_detail.lower()
 
 
 def test_the_report_is_deterministic(db_session: Session, test_user: User) -> None:

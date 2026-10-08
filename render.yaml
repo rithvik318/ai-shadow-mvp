@@ -1,0 +1,66 @@
+# Render Blueprint for the AI Shadow API and its database.
+#
+# The frontend is deployed separately on Vercel (frontend/vercel.json), which
+# proxies /api/* to this service and adds the x-origin-secret header. Set
+# ORIGIN_SECRET to the same value here and in the Vercel project.
+#
+# Secrets are `sync: false`: Render asks for them when the Blueprint is first
+# applied and they never live in this file.
+
+databases:
+  - name: ai-shadow-db
+    plan: 0.1c-256mb
+    postgresMajorVersion: "16"
+    # Private network only: the API reaches it internally, nothing else can.
+    ipAllowList: []
+
+services:
+  - type: web
+    name: ai-shadow-api
+    runtime: python
+    rootDir: backend
+    plan: 0.5c-512mb
+    numInstances: 1
+    buildCommand: pip install -r requirements.txt
+    # Migration 0001 runs CREATE EXTENSION vector itself.
+    preDeployCommand: alembic upgrade head
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.11"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ai-shadow-db
+          property: connectionString
+      - key: DEBUG
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: ORIGIN_SECRET
+        sync: false
+      # OpenRouter
+      - key: LLM_PROVIDER
+        value: openrouter
+      - key: LLM_MODEL
+        value: openai/gpt-oss-20b:nitro
+      - key: OPENROUTER_API_KEY
+        sync: false
+      # Microsoft Graph (Entra application, client credentials)
+      - key: ONEDRIVE_TENANT_ID
+        sync: false
+      - key: ONEDRIVE_CLIENT_ID
+        sync: false
+      - key: ONEDRIVE_CLIENT_SECRET
+        sync: false
+      - key: EMAIL_PROVIDER
+        value: outlook
+      - key: EMAIL_ALLOW_SHARED_FALLBACK_MAILBOX
+        value: "false"
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      # In-process schedulers stay off for this deployment.
+      - key: ONEDRIVE_SYNC_ENABLED
+        value: "false"
+      - key: REPORT_DIGEST_SCHEDULE_ENABLED
+        value: "false"

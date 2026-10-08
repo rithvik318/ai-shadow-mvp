@@ -249,3 +249,156 @@ __all__ = [
     "EMAIL_TRIAGE_PROMPT",
     "RAG_ANSWER_PROMPT",
 ]
+
+
+# --- activity reports ------------------------------------------------------
+#
+# The report pipeline asks for three different things and therefore uses three
+# prompts rather than one long one. Batching every job into a single call is
+# what produced a five-line report: a model asked to read a month and write a
+# document at the same time summarises, because summarising is the cheaper half.
+
+_REPORT_EVIDENCE_RULES = (
+    "Evidence rules — these are not style preferences:\n"
+    "1. Every claim must be supported by messages you were given. Cite them by "
+    "their `id` values in the `evidence` field. A claim with no evidence is "
+    "dropped before the report is written, so an uncited observation is wasted "
+    "work.\n"
+    "2. Never invent a meeting, an attendance, a deadline, a decision, an "
+    "approval, an amount, an outcome or a person. If the correspondence does "
+    "not say it, it did not happen as far as this report is concerned.\n"
+    "3. A sent message is evidence that a reply was written. It is not "
+    "evidence that the underlying work finished.\n"
+    "4. Silence is not failure. A thread with no reply is awaiting one; say so "
+    "rather than concluding it was ignored.\n"
+    "5. Only record a deadline the correspondence states in words. Do not "
+    "derive one from a tone of urgency.\n"
+    "6. Where the evidence genuinely does not settle something, say so. "
+    "`not_determinable` is a correct answer and is preferred to a guess.\n"
+)
+
+_REPORT_STATUSES = (
+    "Evidence status — choose the weakest one the evidence supports:\n"
+    "- explicitly_completed: the correspondence states the thing was done.\n"
+    "- substantially_progressed: real movement, short of completion.\n"
+    "- responded_but_pending: the owner replied; the work itself is unfinished.\n"
+    "- awaiting_external_response: the owner acted and someone else must move.\n"
+    "- open_unresolved: live, and nobody has moved it recently.\n"
+    "- possible_follow_up: something may be owed, but the thread does not say.\n"
+    "- not_determinable: the evidence does not settle it.\n"
+)
+
+REPORT_THREAD_ANALYSIS_PROMPT = PromptTemplate(
+    name="report_thread_analysis",
+    system_prompt=(
+        "You analyse email conversations from one person's mailbox so that a "
+        "management activity report can be written from your output. You are "
+        "reading the conversations, not writing the report.\n"
+        "\n"
+        "For each thread you are given, determine what the conversation was "
+        "about as a piece of business, what the mailbox owner did, what other "
+        "people did, what is settled, and what is outstanding.\n"
+        "\n"
+        "Assign each thread a business category from this list, or `other` "
+        "where none fits. Do not force a category the evidence does not "
+        "support: client_management, recruitment, vendor_coordination, "
+        "finance_payments, legal_compliance, business_development, "
+        "government_contracting, marketing, property_strategic, "
+        "internal_operations, technology_project, other.\n"
+        "\n" + _REPORT_STATUSES + "\n" + _REPORT_EVIDENCE_RULES + "\n"
+        "Return JSON only — no prose, no code fence. Exactly this shape:\n"
+        '{{"threads": [{{"thread_id": "...", "topic": "a specific noun '
+        'phrase naming this piece of business", "category": "...", '
+        '"summary": "two to four sentences: the request, what happened, where '
+        'it stands", "owner_actions": ["what the mailbox owner did"], '
+        '"other_actions": ["what other people did"], '
+        '"outcome": "what was settled, or null", '
+        '"status": "explicitly_completed|substantially_progressed|'
+        "responded_but_pending|awaiting_external_response|open_unresolved|"
+        'possible_follow_up|not_determinable", '
+        '"pending_dependency": "who or what it waits on, or null", '
+        '"deadline": "ISO 8601 date stated in the thread, or null", '
+        '"significance": "why this matters to the business, one sentence", '
+        '"risk": "a concrete risk this thread reveals, or null", '
+        '"evidence": ["message id", "message id"]}}]}}'
+    ),
+    user_prompt="{owner}\n\n[THREADS]\n{threads}",
+)
+
+REPORT_PERIOD_SYNTHESIS_PROMPT = PromptTemplate(
+    name="report_period_synthesis",
+    system_prompt=(
+        "You group analysed email conversations into the business workstreams "
+        "they belong to, and draw the management-level conclusions for one "
+        "reporting period.\n"
+        "\n"
+        "A workstream is a coherent piece of business — an account, a hiring "
+        "round, a compliance obligation, a property matter — not a "
+        "correspondent and not a mailbox folder. Two threads with different "
+        "people belong together when they advance the same piece of work.\n"
+        "\n"
+        "Aim for five to ten workstreams where the evidence supports them. "
+        "Fewer is correct when the period genuinely held less. Never invent "
+        "one to reach a number.\n"
+        "\n"
+        "Tasks are supplementary evidence, not the definition of work "
+        "completed. Substantial work routinely happens with no task record: "
+        "answering a client, sending a document, approving something, "
+        "resolving an issue, coordinating a vendor, progressing a contract. "
+        "Judge the period by its correspondence, and never conclude that "
+        "little happened merely because few tasks exist.\n"
+        "\n" + _REPORT_EVIDENCE_RULES + "\n"
+        "Return JSON only — no prose, no code fence. Exactly this shape:\n"
+        '{{"workstreams": [{{"name": "...", "purpose": "one sentence", '
+        '"stakeholders": ["Name (Organisation)"], '
+        '"activity": "what happened in this period, three to six sentences", '
+        '"owner_contribution": "what the mailbox owner specifically did", '
+        '"status": "one sentence on where it stands", '
+        '"next_step": "the next concrete action, or null", '
+        '"risks": ["..."], "thread_ids": ["..."], "evidence": ["message id"]}}], '
+        '"executive_summary": ["six to ten management-level bullets, each '
+        'explaining business significance rather than counting messages"], '
+        '"decisions": [{{"decision": "...", "evidence": ["message id"]}}], '
+        '"unresolved": [{{"question": "...", "evidence": ["message id"]}}], '
+        '"risks": [{{"issue": "...", "impact": "...", "status": "...", '
+        '"evidence": ["message id"]}}], '
+        '"follow_ups": [{{"item": "...", "responsible": "...", '
+        '"deadline": "ISO 8601 or null", "next_action": "...", '
+        '"evidence": ["message id"]}}], '
+        '"workload": "two to four sentences interpreting how the period was '
+        "spent: substantive versus automated, concentrated or spread, whether "
+        'this person acted as an escalation point", '
+        '"management_summary": ["five to eight observations: what mattered, '
+        'what moved, what is at risk, what needs attention next period"]}}'
+    ),
+    user_prompt=(
+        "{owner}\n\n[PERIOD]\n{period}\n\n[ANALYSED THREADS]\n{threads}\n\n"
+        "[TASKS AND CALENDAR]\n{context}"
+    ),
+)
+
+REPORT_CROSS_PERIOD_PROMPT = PromptTemplate(
+    name="report_cross_period",
+    system_prompt=(
+        "You are given per-week analyses of one mailbox and must write the "
+        "cross-week synthesis for the whole reporting period.\n"
+        "\n"
+        "Your job is the part a week cannot see: what carried from one week "
+        "into the next, what was resolved after weeks of movement, what has "
+        "been open throughout, and what changed in emphasis across the "
+        "period. Do not restate each week — the weekly sections are printed "
+        "alongside yours and repeating them wastes the reader's attention.\n"
+        "\n"
+        "If the period is partial, treat it as partial. Do not describe a "
+        "month that has not finished as though it had, and do not read the "
+        "absence of activity in days that have not happened yet as a decline.\n"
+        "\n" + _REPORT_EVIDENCE_RULES + "\n"
+        "Return JSON only — no prose, no code fence. Exactly this shape:\n"
+        '{{"executive_summary": ["six to ten bullets for the whole period"], '
+        '"carried_forward": [{{"item": "...", "from_week": "...", '
+        '"status": "...", "evidence": ["message id"]}}], '
+        '"themes": ["recurring themes across the weeks"], '
+        '"management_summary": ["five to eight observations for the period"]}}'
+    ),
+    user_prompt="{owner}\n\n[PERIOD]\n{period}\n\n[WEEKLY ANALYSES]\n{weeks}",
+)

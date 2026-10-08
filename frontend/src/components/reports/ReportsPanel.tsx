@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import * as api from "../../api";
 import { ApiError } from "../../api/client";
 import type {
+  ActivityReport,
+  ActivityReportPending,
   ReportEnvelope,
   ReportHistory,
   ReportPeriod,
@@ -10,9 +12,11 @@ import type {
 } from "../../api/types";
 import { formatDateTime } from "../../lib/format";
 import { REPORT_TYPES, describePeriod, describeProvenance } from "../../lib/digest";
+import { fallbackFor, faultMessage } from "../../lib/reportFault";
 import { useTwins } from "../../state/TwinContext";
 import { MailboxPanel } from "../email/MailboxPanel";
 import { Badge, Button, EmptyState, ErrorNotice, SectionHeading, Spinner } from "../ui";
+import { ActivityReportDocument } from "./ActivityReportDocument";
 import { WeeklyReportPanel } from "./WeeklyReportPanel";
 
 /**
@@ -34,7 +38,39 @@ import { WeeklyReportPanel } from "./WeeklyReportPanel";
  * change: the server serves the snapshot, and the download is rendered from
  * that same snapshot rather than rebuilt, so what is on screen and what is in
  * the file are the same thing next month as today.
+ *
+ * That second rule now has an exception, and it is deliberate. The detailed
+ * activity report is computed from correspondence on request rather than
+ * stored, so the two live side by side: `GET /reports/activity` produces what
+ * is on screen, and the stored snapshots remain listed and downloadable
+ * underneath. Showing a cached digest where a person asked for the detailed
+ * report would be the silent-stale-snapshot problem, and showing only the
+ * detailed one would throw away history — so neither replaces the other.
  */
+/**
+ * The last day a period actually includes.
+ *
+ * `ReportPeriod.end` is exclusive — a month ends at midnight on the 1st of the
+ * next one — while the backend's `end` query parameter is an inclusive date.
+ * Passing `end` straight through would ask for a report one day longer than
+ * the period selected, which for a month means reporting a day of the next
+ * one.
+ */
+/**
+ * How long the page waits for somebody else's generation, and how often it
+ * asks. Five seconds apart, for four minutes — longer than a report takes when
+ * it is working, short enough that a stuck one is reported rather than hidden.
+ */
+const POLL_INTERVAL_MS = 5_000;
+const POLL_ATTEMPTS = 48;
+
+function lastDayOf(period: ReportPeriod): string {
+  const end = new Date(period.end);
+  end.setUTCDate(end.getUTCDate() - 1);
+
+  return end.toISOString().slice(0, 10);
+}
+
 export function ReportsPanel() {
   const { currentTwin } = useTwins();
   const userId = currentTwin?.id ?? null;
@@ -43,16 +79,38 @@ export function ReportsPanel() {
   const [periodKey, setPeriodKey] = useState<string | null>(null);
   const [history, setHistory] = useState<ReportHistory | null>(null);
   const [envelope, setEnvelope] = useState<ReportEnvelope | null>(null);
+  const [activity, setActivity] = useState<ActivityReport | null>(null);
+  const [pending, setPending] = useState<ActivityReportPending | null>(null);
+  const [activityFault, setActivityFault] = useState<Error | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [attempts, setAttempts] = useState(0);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // What has already been asked for, and which request is the current one.
+  //
+  // Generating the detailed report is minutes of server work — a mailbox read
+  // and a model call per conversation — so a duplicate is not a wasted
+  // round trip, it is a second pipeline. Two things used to cause them. The
+  // effect below was keyed on the period *object*, and every reload produces
+  // an equal period with a fresh identity, so re-reading the stored report
+  // re-ran the analysis. And nothing tracked what was in flight, so changing
+  // the period while one was running left both running and let whichever
+  // finished last win.
+  const requested = useRef<string | null>(null);
+  const runId = useRef(0);
+
   const changeType = useCallback((next: ReportType) => {
     setReportType(next);
+    requested.current = null;
     // A week key means nothing to a monthly report, and carrying it across
     // would ask for a month that does not exist.
     setPeriodKey(null);
     setEnvelope(null);
+    setActivity(null);
+    setPending(null);
+    setActivityFault(null);
   }, []);
 
   const load = useCallback(async () => {
@@ -67,6 +125,9 @@ export function ReportsPanel() {
     setError(null);
     setEnvelope(null);
     setHistory(null);
+    setActivity(null);
+    setPending(null);
+    setActivityFault(null);
 
     try {
       const [found, current] = await Promise.all([
@@ -88,6 +149,112 @@ export function ReportsPanel() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /**
+   * Ask for this period's report.
+   *
+   * `rebuild` is the Regenerate button and nothing else. A plain `GET` reuses
+   * what the backend stored — a period that has closed comes back in
+   * milliseconds — so opening the tab, switching back to a period and
+   * reloading the page all cost a database read rather than a pipeline run.
+   */
+  const generate = useCallback(
+    async (period: ReportPeriod | null, { rebuild = false } = {}) => {
+      if (!userId || !period) return;
+
+      const id = (runId.current += 1);
+      const superseded = () => runId.current !== id;
+
+      setGenerating(true);
+      setActivityFault(null);
+
+      const window = {
+        start: period.start.slice(0, 10),
+        // A period still running has no last day yet. Omitting `end` is what
+        // makes the backend run the window up to the end of today and label
+        // the result provisional, rather than claiming a period that has not
+        // happened.
+        end: period.is_complete ? lastDayOf(period) : undefined,
+      };
+
+      try {
+        const answer = rebuild
+          ? await api.regenerateActivityReport(userId, window)
+          : await api.getActivityReport(userId, window);
+
+        if (superseded()) return;
+
+        if (answer.state === "generating") {
+          // Somebody else — another tab, another person — is already building
+          // this one. Wait for theirs rather than starting a second.
+          setPending(answer);
+          setActivity(null);
+        } else {
+          setPending(null);
+          setActivity(answer);
+        }
+      } catch (cause) {
+        if (superseded()) return;
+
+        // The failure itself is kept, not a string made from it. Whether the
+        // stored digest may stand in for the detailed report depends on *why*
+        // this failed, and a message cannot be asked that.
+        setActivity(null);
+        setPending(null);
+        setActivityFault(
+          cause instanceof Error
+            ? cause
+            : new Error("The detailed report could not be generated."),
+        );
+      } finally {
+        if (!superseded()) setGenerating(false);
+      }
+    },
+    [userId],
+  );
+
+  /**
+   * While another request is building this report, ask again — a bounded
+   * number of times.
+   *
+   * Bounded because an unbounded poll behind a spinner is how a page ends up
+   * claiming to be working long after nothing is. When the attempts run out
+   * the panel says so and offers the button, rather than spinning for ever.
+   */
+  useEffect(() => {
+    if (!pending || !envelope || attempts >= POLL_ATTEMPTS) return;
+
+    const timer = window.setTimeout(() => {
+      setAttempts((count) => count + 1);
+      void generate(envelope.period);
+    }, POLL_INTERVAL_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [pending, attempts, envelope, generate]);
+
+  // Generated when the tab or the *period* changes — the period's key, not the
+  // object carrying it, because an equal period arriving from a fresh fetch is
+  // not a new question and must not start a second analysis.
+  const periodKeyInView = envelope?.period.key ?? null;
+
+  useEffect(() => {
+    if (reportType === "weekly_work" || !userId) return;
+
+    const period = envelope?.period ?? null;
+
+    if (!period) return;
+
+    const asked = `${userId}:${reportType}:${period.key}`;
+
+    if (requested.current === asked) return;
+
+    requested.current = asked;
+    setAttempts(0);
+    void generate(period);
+    // `envelope` is deliberately absent: its identity changes on every load,
+    // and the key above is what decides whether there is a new question.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, reportType, periodKeyInView, generate]);
 
   async function saveDocument() {
     if (!userId || !envelope) return;
@@ -139,14 +306,32 @@ export function ReportsPanel() {
         description="A short management summary of what happened, for a week or a month."
         actions={
           envelope && reportType !== "weekly_work" ? (
-            <Button
-              type="button"
-              variant="primary"
-              disabled={downloading}
-              onClick={() => void saveDocument()}
-            >
-              {downloading ? "Preparing…" : "Download"}
-            </Button>
+            <div className="flex items-center gap-2">
+              {/* The detailed report is computed per request, so regenerating
+                  is a real action rather than a cache bust. */}
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={generating}
+                onClick={() => {
+                  // The only path that rebuilds a report. Everything else on
+                  // this screen reads what is stored.
+                  requested.current = `${userId}:${reportType}:${envelope.period.key}`;
+                  setAttempts(0);
+                  void generate(envelope.period, { rebuild: true });
+                }}
+              >
+                {generating ? "Analysing…" : "Regenerate"}
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
+                disabled={downloading}
+                onClick={() => void saveDocument()}
+              >
+                {downloading ? "Preparing…" : "Download"}
+              </Button>
+            </div>
           ) : null
         }
       />
@@ -214,18 +399,69 @@ export function ReportsPanel() {
           </div>
         ) : envelope ? (
           <>
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <Badge tone="info">{envelope.period.label}</Badge>
-              {envelope.is_provisional ? (
-                <Badge tone="warning">In progress</Badge>
-              ) : null}
-              <span className="text-xs text-ink-500">
-                {describeProvenance(envelope)} Generated{" "}
-                {formatDateTime(envelope.generated_at)}.
-              </span>
-            </div>
+            {activityFault && fallbackFor(activityFault) === "error" ? (
+              <div className="mb-3">
+                <ErrorNotice
+                  message={faultMessage(activityFault)}
+                  onRetry={() => void generate(envelope.period)}
+                />
+              </div>
+            ) : null}
 
-            <ActivityDocument envelope={envelope} />
+            {generating && !pending ? (
+              <div className="py-10 text-center">
+                <Spinner
+                  label={
+                    activity
+                      ? "Rebuilding this report"
+                      : "Reading this period's report"
+                  }
+                />
+              </div>
+            ) : pending ? (
+              <GeneratingNotice
+                pending={pending}
+                exhausted={attempts >= POLL_ATTEMPTS}
+                onCheck={() => {
+                  setAttempts(0);
+                  void generate(envelope.period);
+                }}
+              />
+            ) : activity ? (
+              <ActivityReportDocument report={activity} />
+            ) : fallbackFor(activityFault) === "error" ? (
+              /* Deliberately nothing. A server fault is not a quiet month, and
+                 the stored digest rendered underneath one reads as the answer:
+                 that is how an HTTP 500 sat on this screen behind "83 messages
+                 received", looking like a report. The error above is the whole
+                 content until the request succeeds. */
+              null
+            ) : (
+              /* No mailbox connected — a configuration state, not a failure —
+                 so the stored digest is shown instead of nothing, with its own
+                 provenance line saying what it is. */
+              <>
+                {activityFault ? (
+                  <p className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    {faultMessage(activityFault)} The stored summary below is
+                    shown in its place.
+                  </p>
+                ) : null}
+
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <Badge tone="info">{envelope.period.label}</Badge>
+                  {envelope.is_provisional ? (
+                    <Badge tone="warning">In progress</Badge>
+                  ) : null}
+                  <span className="text-xs text-ink-500">
+                    {describeProvenance(envelope)} Generated{" "}
+                    {formatDateTime(envelope.generated_at)}.
+                  </span>
+                </div>
+
+                <ActivityDocument envelope={envelope} />
+              </>
+            )}
           </>
         ) : (
           <EmptyState
@@ -238,6 +474,59 @@ export function ReportsPanel() {
           <StoredReports items={stored} onOpen={setPeriodKey} />
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Somebody is already building this report, and this says so out loud.
+ *
+ * Deliberately not a spinner. A spinner with no end is how a page that is
+ * waiting becomes indistinguishable from a page that is broken; this names
+ * what is happening, how long it has been happening, and what the reader can
+ * do when it has been too long.
+ */
+function GeneratingNotice({
+  pending,
+  exhausted,
+  onCheck,
+}: {
+  pending: ActivityReportPending;
+  exhausted: boolean;
+  onCheck: () => void;
+}) {
+  const minutes = Math.floor(pending.elapsed_seconds / 60);
+  const elapsed =
+    minutes >= 1
+      ? `${minutes} minute${minutes === 1 ? "" : "s"}`
+      : `${Math.round(pending.elapsed_seconds)} seconds`;
+
+  return (
+    <div className="rounded-lg border border-ink-200 bg-ink-50 px-4 py-5 text-center">
+      <div className="flex items-center justify-center gap-2">
+        {exhausted ? null : <Spinner label="" />}
+        <p className="text-sm font-medium text-ink-800">
+          This report is being generated
+        </p>
+      </div>
+
+      <p className="mx-auto mt-2 max-w-md text-xs text-ink-600">
+        Started {elapsed} ago, in this session or another one. It is stored when
+        it finishes, and every request after that reads it from storage rather
+        than rebuilding it.
+      </p>
+
+      {exhausted ? (
+        <div className="mt-3">
+          <p className="text-xs text-amber-700">
+            It has been running longer than a report usually takes. Nothing has
+            been lost — checking again is safe.
+          </p>
+          <Button type="button" variant="secondary" onClick={onCheck}>
+            Check again
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -290,8 +579,7 @@ function ActivityDocument({ envelope }: { envelope: ReportEnvelope }) {
                 {lines.map((entry, position) => {
                   const line = (entry ?? {}) as Record<string, unknown>;
                   const text = typeof line.text === "string" ? line.text : "";
-                  const detail =
-                    typeof line.detail === "string" ? line.detail : null;
+                  const detail = typeof line.detail === "string" ? line.detail : null;
 
                   return (
                     <li key={`${text}-${position}`} className="text-sm text-ink-700">
@@ -345,7 +633,11 @@ function StoredReports({
                 {item.status === "unavailable" ? " · email unavailable" : null}
               </p>
             </div>
-            <Button type="button" variant="ghost" onClick={() => onOpen(item.period.key)}>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => onOpen(item.period.key)}
+            >
               Open
             </Button>
           </li>

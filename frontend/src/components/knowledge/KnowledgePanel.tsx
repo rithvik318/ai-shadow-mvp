@@ -19,6 +19,7 @@ const STATUS_TONE: Record<
   // Not failures: the ingestion layer distinguishes "cannot read this format"
   // from "tried and could not finish", and the remedies differ.
   unsupported: "warning",
+  ocr_required: "warning",
   failed: "danger",
 };
 
@@ -149,7 +150,7 @@ export function KnowledgePanel({ reloadToken }: { reloadToken: number }) {
           <div>
             <h2 className="text-sm font-semibold text-ink-900">Manual upload</h2>
             <p className="mt-0.5 mb-2.5 text-xs text-ink-500">
-              For ad-hoc documents. PDF, DOCX, PPTX, TXT and Markdown.
+              For ad-hoc documents. PDF, DOCX, PPTX, XLSX, HTML, TXT and Markdown.
             </p>
             <UploadTray onIngested={() => setLocalReload((token) => token + 1)} />
           </div>

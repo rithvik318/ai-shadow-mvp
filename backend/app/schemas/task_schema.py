@@ -269,3 +269,44 @@ class WeeklyReportResponse(BaseModel):
     calendar_detail: str
     events: list[EventResponse] = Field(default_factory=list)
     events_needing_answer: list[EventResponse] = Field(default_factory=list)
+
+
+class CalendarStatusResponse(BaseModel):
+    """Whether this user's real calendar can be read, and why not.
+
+    Never an error, because the answer "it cannot" is the useful one and a
+    screen that has to catch an exception to render it will eventually not.
+    """
+
+    configured: bool
+    connected: bool
+    mailbox: str | None
+    detail: str
+    #: Whether meetings have actually arrived from a provider. Distinct from
+    #: `connected`: consent can be granted with nothing imported yet.
+    has_imported_events: bool
+
+
+class CalendarImportRequest(BaseModel):
+    """The window to import. Both ends explicit — no default 'recent'.
+
+    A caller that means the last week says so. Defaulting would put the choice
+    of what a report covers in two places, and they would eventually disagree.
+    """
+
+    since: datetime
+    until: datetime
+
+
+class CalendarImportResponse(BaseModel):
+    """What the import did, counted in rows rather than described in prose."""
+
+    mailbox: str
+    since: datetime
+    until: datetime
+    created: int
+    updated: int
+    unchanged: int
+    #: A subset of the occurrences seen, not a fourth category.
+    cancelled: int
+    total: int

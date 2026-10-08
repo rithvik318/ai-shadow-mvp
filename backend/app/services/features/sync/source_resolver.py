@@ -28,7 +28,7 @@ taken instead.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from app.core.exceptions import GraphAuthError, GraphError
@@ -277,8 +277,50 @@ def _resolve_in_drive(client: GraphClient, source: OneDriveSource) -> ResolvedSo
     )
 
 
+def _with_user_drive(
+    client: GraphClient, source: OneDriveSource
+) -> OneDriveSource | ResolvedSource:
+    """Fill in the drive id of the person this source names.
+
+    Returns the source with its drive id resolved, or the failure to report.
+    Asking Graph rather than storing the id keeps an opaque, account-lifetime
+    string out of configuration: an operator can check that
+    `sudha.gummuluru@sunradia.com` is the right person, and cannot check that
+    `b!ak7TVLHktUyh…` is the right drive.
+    """
+
+    try:
+        drive_id, _ = find_user_drive(client, source.user or "")
+    except GraphAuthError as exc:
+        return _failure(
+            source, Verdict.ACCESS_DENIED, str(exc), remedy=_ACCESS_DENIED_REMEDY
+        )
+    except (GraphError, ValueError) as exc:
+        return _failure(
+            source,
+            Verdict.NOT_FOUND,
+            f"No OneDrive could be found for {source.user!r}. {exc}",
+            remedy=(
+                "Check the address is a licensed account in this tenant and "
+                "that its OneDrive has been provisioned — a OneDrive is "
+                "created on first use, so an account that has never opened one "
+                "has no drive to read."
+            ),
+        )
+
+    return replace(source, drive_id=drive_id)
+
+
 def resolve_source(client: GraphClient, source: OneDriveSource) -> ResolvedSource:
     """Ask Graph where one configured folder is, by whichever route it named."""
+
+    if source.addressed_by_user_drive:
+        found = _with_user_drive(client, source)
+
+        if isinstance(found, ResolvedSource):
+            return found
+
+        source = found
 
     if source.item_id or source.path:
         if not source.drive_id:
@@ -286,7 +328,7 @@ def resolve_source(client: GraphClient, source: OneDriveSource) -> ResolvedSourc
                 source,
                 Verdict.NOT_ADDRESSABLE,
                 "A path or item id is relative to a drive, and no `drive_id` "
-                "is configured for this source.",
+                "or `user` is configured for this source.",
             )
 
         return _resolve_in_drive(client, source)
@@ -294,10 +336,15 @@ def resolve_source(client: GraphClient, source: OneDriveSource) -> ResolvedSourc
     if source.share_url:
         return _resolve_by_share_link(client, source)
 
+    if source.drive_id:
+        # A drive named with no folder inside it means the whole library, which
+        # `resolve_folder` addresses as the drive root.
+        return _resolve_in_drive(client, source)
+
     return _failure(
         source,
         Verdict.NOT_ADDRESSABLE,
-        "The source names no `path`, `item_id` or `share_url`.",
+        "The source names no `path`, `item_id`, `share_url` or `user`.",
     )
 
 

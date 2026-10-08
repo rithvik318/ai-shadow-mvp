@@ -85,6 +85,7 @@ class OneDriveSyncState(Base):
     last_unchanged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_deleted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_unsupported: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_ocr_required: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     created_at: Mapped[datetime] = mapped_column(

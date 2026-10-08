@@ -72,7 +72,7 @@ not authentication — see [Security](#security).
 
 ### Knowledge base and grounded chat
 
-Documents arrive by upload (PDF, DOCX, TXT, Markdown) or from configured
+Documents arrive by upload (PDF, DOCX, PPTX, XLSX, HTML, TXT, Markdown) or from configured
 OneDrive/SharePoint folders. They are parsed with their page numbers and
 headings intact, chunked with overlap, embedded, and stored in pgvector.
 
@@ -155,6 +155,14 @@ A report is snapshotted when generated and never rewritten, so completing a task
 in September cannot change August's report. History lists only what was actually
 generated, capped at the five most recent.
 
+The detailed activity report — the evidence-based one, written from
+correspondence rather than counts — is `GET /reports/activity?start=&end=`. It
+is generated once per window and stored: asking again reads the stored document
+rather than rebuilding it, so a period that has closed comes back in
+milliseconds. `POST` to the same path rebuilds it, and that is what Regenerate
+does. A request arriving while another is generating the same window is
+answered `202` rather than starting a second.
+
 A separate interactive weekly work view covers meetings that need an answer and
 escalations, which are actions on live work rather than a document.
 
@@ -162,9 +170,16 @@ escalations, which are actions on live work rather than a document.
 
 Events are user-scoped, and attendance is recorded only when a person says what
 happened — a meeting existing is never treated as evidence that anybody went to
-it. Imported calendar data requires a Graph permission this deployment does not
-yet have; until then events are entered by hand and the reports say the calendar
-was unavailable rather than showing an empty week.
+it. Meetings are read from Microsoft Graph with `POST /calendar/import`, which
+takes an explicit window, is idempotent on Graph's event id, and never
+overwrites an answer somebody has already given. `GET /calendar/status` says
+whether the application actually has `Calendars.Read` for that mailbox, because
+neither the files consent nor the mail consent covers it. Nothing imports on a
+schedule, and nothing acts on a meeting: importing is reading.
+
+The reports distinguish three states rather than two — no calendar read, read
+and empty, read with meetings in it — so an unread calendar never displays as a
+free week.
 
 ---
 
@@ -210,14 +225,14 @@ the `X-User-ID` header.
 | Email | `POST /email/compose`, `GET /email/messages`, `POST /email/triage`, `POST /email/threads/summarize`, `GET /email/assessments`, `GET /email/follow-ups`, `POST /email/follow-ups/{id}/handled` |
 | Drafts and templates | `GET/POST /email/drafts`, `GET/PATCH/DELETE /email/drafts/{id}`, `POST /email/drafts/{id}/approve`, `POST /email/drafts/{id}/send`, attachments, and the `/email/templates` set |
 | Tasks | `GET/POST /tasks`, `GET/PATCH/DELETE /tasks/{id}`, `POST /tasks/{id}/complete`, `POST /tasks/from-follow-up/{assessment_id}`, `POST /tasks/from-follow-ups` |
-| Calendar | `GET/POST /events`, `GET/PATCH/DELETE /events/{id}`, `POST /events/{id}/attendance` |
-| Reports | `GET /reports`, `GET /reports/history`, `GET /reports/document`, `POST /reports/digests/run`, `GET /reports/weekly` |
+| Calendar | `GET/POST /events`, `GET/PATCH/DELETE /events/{id}`, `POST /events/{id}/attendance`, `GET /calendar/status`, `POST /calendar/import` |
+| Reports | `GET /reports`, `GET /reports/history`, `GET /reports/document`, `POST /reports/digests/run`, `GET /reports/weekly`, `GET /reports/activity`, `POST /reports/activity` |
 | Service | `GET /health`, `GET /` |
 
 Every mapped domain error returns the same shape:
 
 ```json
-{ "detail": "Unsupported document type: application/zip. Supported formats are PDF, DOCX, TXT and Markdown.", "error": "UnsupportedDocumentTypeError" }
+{ "detail": "Unsupported document type: image/png. Supported formats are PDF, DOCX, PPTX, XLSX, HTML, TXT and Markdown.", "error": "UnsupportedDocumentTypeError" }
 ```
 
 ---
@@ -310,6 +325,35 @@ Microsoft account rather than by the tenant — an application token has authori
 only inside the tenant that issued it, so no permission grant can read it. Such
 content has to be copied into the tenant and linked from its
 `*.sharepoint.com` address.
+
+### Checking a live run
+
+Two scripts exist because a sync's own status field cannot answer the question
+that matters, which is whether anything was actually read. Both run from
+`backend/` with `python -m`, so they work identically from PowerShell and from
+a POSIX shell.
+
+```bash
+python -m scripts.diagnose_onedrive_corpus            # metadata only, read-only
+python -m scripts.diagnose_onedrive_corpus --probe    # + one content redirect per file
+python -m scripts.validate_live_integration --full    # config → auth → sync → calendar → retrieval
+```
+
+`diagnose_onedrive_corpus` enumerates the configured source and tabulates every
+file by extension, declared MIME type, and what the sync would decide about it
+before fetching a byte. With `--probe` it asks Graph for each file's `/content`
+redirect and reports the answers, which is one cheap request per file and no
+downloaded content. It writes nothing and exits non-zero when files were offered
+and none of them could be downloaded.
+
+`validate_live_integration` runs the whole path and stops at the first blocking
+failure. It exits 0 only if the sync, the calendar and retrieval all pass, and a
+run that discovered files but successfully read none of them is a failure no
+matter what status the sync reported. Its retrieval stage counts documents
+written during that run separately from documents that were already in the
+knowledge base, so history cannot stand in for a run that did nothing. Neither
+script prints a secret: tokens and pre-authorised URLs are reduced to a host,
+and query strings are stripped.
 
 ---
 

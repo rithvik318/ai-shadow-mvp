@@ -5,9 +5,11 @@ opaque blobs, and so page and heading structure is visible in the test that
 depends on it.
 """
 
+import codecs
 import io
 
 import docx
+import openpyxl
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
 from pptx import Presentation
@@ -184,6 +186,63 @@ def build_markdown(sections: list[tuple[str, str]]) -> bytes:
 
 def build_text(body: str) -> bytes:
     return body.encode("utf-8")
+
+
+def build_html(sections: list[tuple[str, str]], *, script: str = "") -> bytes:
+    """Return an HTML page built from (heading, body) pairs.
+
+    `script` puts something in a `<script>` tag, so a test can assert that
+    source code does not reach the index — a page's JavaScript embedded as
+    prose makes every page look similar to every other.
+    """
+
+    body = "".join(f"<h2>{heading}</h2><p>{text}</p>" for heading, text in sections)
+    tag = f"<script>{script}</script>" if script else ""
+
+    return (
+        "<html><head><title>Ignored</title>"
+        "<style>p { color: red }</style></head>"
+        f"<body>{body}{tag}</body></html>"
+    ).encode()
+
+
+def build_utf16_html(
+    sections: list[tuple[str, str]], *, big_endian: bool = False, bom: bool = True
+) -> bytes:
+    """Return the same page as `build_html`, encoded UTF-16.
+
+    What a MindManager export looks like, and what defeated encoding detection:
+    every single-byte codec in the fallback chain accepts these bytes without
+    raising, so the failure is not a decode error but a string of alternating
+    characters and NULs that PostgreSQL then refuses outright.
+
+    `bom=False` produces the harder case — the same bytes with nothing
+    declaring what they are.
+    """
+
+    text = build_html(sections).decode()
+    encoding = "utf-16-be" if big_endian else "utf-16-le"
+    mark = (codecs.BOM_UTF16_BE if big_endian else codecs.BOM_UTF16_LE) if bom else b""
+
+    return mark + text.encode(encoding)
+
+
+def build_xlsx(sheets: dict[str, list[list[object]]]) -> bytes:
+    """Return a workbook built from {sheet name: rows}."""
+
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+
+    for name, rows in sheets.items():
+        sheet = workbook.create_sheet(name)
+
+        for row in rows:
+            sheet.append(row)
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+
+    return buffer.getvalue()
 
 
 def build_docx_blocks(blocks: list[tuple[str, object]]) -> bytes:

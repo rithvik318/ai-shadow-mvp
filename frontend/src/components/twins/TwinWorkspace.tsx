@@ -19,6 +19,7 @@ import {
   parseList,
   preferenceMemories,
 } from "../../lib/twin";
+import { useTwins } from "../../state/TwinContext";
 import { Badge, Button, ErrorNotice, Spinner } from "../ui";
 
 type Tab = "overview" | "profile" | "preferences" | "memories";
@@ -38,11 +39,29 @@ interface Props {
 }
 
 export function TwinWorkspace({ twin, isActive, onMakeActive, onBack }: Props) {
+  const { refresh } = useTwins();
   const [tab, setTab] = useState<Tab>("overview");
   const [profile, setProfile] = useState<Profile | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * A saved profile, and the twin list re-read.
+   *
+   * `name` and `role` are stored twice — on the profile, and on the user
+   * record every label in the workspace reads — and saving the profile writes
+   * both. Without this the write lands in the database and the sidebar, the
+   * twin switcher and this page's own header keep the old name until a reload,
+   * which is indistinguishable from the save having failed.
+   */
+  const saved = useCallback(
+    (next: Profile) => {
+      setProfile(next);
+      void refresh();
+    },
+    [refresh],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -58,9 +77,9 @@ export function TwinWorkspace({ twin, isActive, onMakeActive, onBack }: Props) {
     } else {
       setProfile(null);
       // No profile yet is an empty state, not a failure.
-      if (
-        !(profileResult.reason instanceof ApiError && profileResult.reason.isNotFound)
-      ) {
+      if (!(
+        profileResult.reason instanceof ApiError && profileResult.reason.isNotFound
+      )) {
         setError("Unable to load this Digital Twin's profile. Try again.");
       }
     }
@@ -136,13 +155,13 @@ export function TwinWorkspace({ twin, isActive, onMakeActive, onBack }: Props) {
         ) : tab === "overview" ? (
           <Overview profile={profile} memories={memories} now={now} />
         ) : tab === "profile" ? (
-          <ProfileForm twin={twin} profile={profile} onSaved={setProfile} />
+          <ProfileForm twin={twin} profile={profile} onSaved={saved} />
         ) : tab === "preferences" ? (
           <Preferences
             twin={twin}
             profile={profile}
             memories={memories}
-            onSaved={setProfile}
+            onSaved={saved}
           />
         ) : (
           <Memories
@@ -242,16 +261,40 @@ function ProfileForm({
     setSaving(true);
     setError(null);
 
+    // Name, role and organization back NOT NULL columns, and the backend
+    // contract is that an absent key is left alone. Sending "" for a field the
+    // person never filled in is therefore not "clear it" — it is a request to
+    // blank a required column, and it is what returned HTTP 422 on Save for
+    // any twin whose profile had no organization. Omitting the blank ones
+    // preserves whatever is stored and lets a genuine edit through.
     const body: ProfileUpdate = {
-      name: values.name.trim(),
-      role: values.role.trim(),
-      organization: values.organization.trim(),
       communication_style: values.communication_style.trim(),
       responsibilities: parseList(values.responsibilities),
       expertise: parseList(values.expertise),
       priorities: parseList(values.priorities),
       current_focus: parseList(values.current_focus),
     };
+
+    for (const field of EDITABLE_PROFILE_TEXT) {
+      const value = values[field.key].trim();
+
+      if (value) {
+        body[field.key] = value;
+      }
+    }
+
+    // Caught here rather than by the server, because on a *first* save these
+    // genuinely are required and a round trip to be told so is a worse
+    // experience than being told before sending.
+    const missing = EDITABLE_PROFILE_TEXT.filter((field) => !values[field.key].trim());
+
+    if (!profile && missing.length > 0) {
+      setSaving(false);
+      setError(
+        `A new profile needs ${missing.map((field) => field.label.toLowerCase()).join(", ")}.`,
+      );
+      return;
+    }
 
     try {
       onSaved(await api.saveProfile(twin.id, body));
@@ -274,6 +317,7 @@ function ProfileForm({
             label={field.label}
             value={values[field.key]}
             onChange={set(field.key)}
+            required={!profile}
           />
         ))}
       </div>
@@ -697,11 +741,14 @@ function TextField({
   label,
   value,
   onChange,
+  required = false,
 }: {
   label: string;
   value: string;
   // The union, because one handler is shared with the textarea fields below.
   onChange: (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
+  /** Only on a first save: an edit may leave a field blank to keep its value. */
+  required?: boolean;
 }) {
   const id = `profile-${label.toLowerCase().replace(/\s+/g, "-")}`;
 
@@ -709,11 +756,13 @@ function TextField({
     <div>
       <label htmlFor={id} className="block text-xs font-medium text-ink-600">
         {label}
+        {required ? <span className="text-rose-600"> *</span> : null}
       </label>
       <input
         id={id}
         value={value}
         onChange={onChange}
+        required={required}
         className="mt-1 w-full rounded-md border border-ink-200 px-2.5 py-1.5 text-sm"
       />
     </div>

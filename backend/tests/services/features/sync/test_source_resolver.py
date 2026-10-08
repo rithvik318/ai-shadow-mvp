@@ -24,7 +24,13 @@ from app.services.features.sync.source_resolver import (
 )
 from app.services.graph.client import GraphClient
 from app.services.graph.share_link import SharedResourceKind
-from tests.support.graph import DRIVE_ID, drive_item, graph_transport, sources_json
+from tests.support.graph import (
+    DRIVE_ID,
+    FOLDER_ID,
+    drive_item,
+    graph_transport,
+    sources_json,
+)
 
 # The five SunRadia folders, written the way `.env` carries them. Kept here
 # rather than in application code on purpose: the point of the configuration
@@ -499,3 +505,141 @@ def test_a_source_naming_nothing_is_refused() -> None:
     resolved = resolve_source(_client({}), OneDriveSource(key="k", label="k"))
 
     assert resolved.verdict is Verdict.NOT_ADDRESSABLE
+
+
+class TestAddressingByUser:
+    """A folder in somebody's OneDrive, named by whose account it is.
+
+    The Knowledge Base SunRadia supplied lives on a personal site, and a
+    personal site's drive id is an opaque string nobody can check by reading
+    it. Naming the person instead keeps configuration reviewable: an operator
+    can confirm that `sudha.gummuluru@sunradia.com` is the right account, and
+    cannot confirm that `b!ak7TVLHktUyh…` is the right drive.
+    """
+
+    def _client(self, **routes) -> GraphClient:
+        return GraphClient(
+            tenant_id="t",
+            client_id="c",
+            client_secret="s",
+            transport=graph_transport(routes),
+        )
+
+    def test_the_drive_is_looked_up_from_the_address(self):
+        source = load_sources(
+            sources_json(
+                {
+                    "key": "knowledge-base",
+                    "label": "Knowledge Base",
+                    "user": "sudha.gummuluru@sunradia.com",
+                    "path": "Knowledge Base",
+                }
+            )
+        )[0]
+
+        client = self._client(
+            **{
+                "/users/sudha.gummuluru@sunradia.com/drive": {
+                    "id": DRIVE_ID,
+                    "name": "OneDrive",
+                },
+                # Percent-encoded, because that is what goes on the wire —
+                # the route has to match the URL httpx actually builds.
+                "/root:/Knowledge%20Base": drive_item(
+                    "kb-folder", "Knowledge Base", folder=True
+                ),
+            }
+        )
+
+        resolved = resolve_source(client, source)
+
+        assert resolved.resolved
+        assert resolved.drive_id == DRIVE_ID
+        assert resolved.item_id == "kb-folder"
+
+    def test_a_configured_drive_id_wins_over_the_address(self):
+        # An explicit id is a deliberate override, and looking the user up
+        # anyway would spend a round trip to reach the same answer — or a
+        # different one, silently.
+        source = load_sources(
+            sources_json(
+                {
+                    "key": "kb",
+                    "user": "somebody@sunradia.com",
+                    "drive_id": DRIVE_ID,
+                    "path": "Knowledge Base",
+                }
+            )
+        )[0]
+
+        assert source.addressed_by_user_drive is False
+
+    def test_an_account_with_no_onedrive_is_reported_not_guessed(self):
+        source = load_sources(
+            sources_json(
+                {"key": "kb", "user": "nobody@sunradia.com", "path": "Knowledge Base"}
+            )
+        )[0]
+
+        # No route for the drive: Graph answers 404.
+        resolved = resolve_source(self._client(), source)
+
+        assert not resolved.resolved
+        assert resolved.verdict is Verdict.NOT_FOUND
+        assert "nobody@sunradia.com" in (resolved.error or "")
+        assert "provisioned" in (resolved.remedy or "")
+
+    def test_a_refused_lookup_reads_as_access_denied(self):
+        source = load_sources(
+            sources_json(
+                {"key": "kb", "user": "sudha@sunradia.com", "path": "Knowledge Base"}
+            )
+        )[0]
+
+        client = self._client(
+            **{"/users/sudha@sunradia.com/drive": (403, {"error": {"code": "denied"}})}
+        )
+
+        resolved = resolve_source(client, source)
+
+        assert resolved.verdict is Verdict.ACCESS_DENIED
+        # An administrator can fix this one; the remedy says how.
+        assert "Files.Read.All" in (resolved.remedy or "")
+
+    def test_a_source_naming_a_user_never_falls_back_to_the_default_drive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The deployment default is a *different* drive. Falling back to it
+        # would synchronise the wrong library, and the symptom would be an
+        # empty folder rather than an error.
+        from app.config import settings as settings_module
+
+        monkeypatch.setattr(
+            settings_module.settings, "ONEDRIVE_DRIVE_ID", "some-other-drive"
+        )
+
+        source = load_sources(
+            sources_json(
+                {"key": "kb", "user": "sudha@sunradia.com", "path": "Knowledge Base"}
+            )
+        )[0]
+
+        assert source.drive_id is None
+        assert source.addressed_by_user_drive is True
+
+    def test_a_whole_library_can_be_named_without_a_folder(self):
+        source = load_sources(
+            sources_json({"key": "library", "user": "sudha@sunradia.com"})
+        )[0]
+
+        client = self._client(
+            **{
+                "/users/sudha@sunradia.com/drive": {"id": DRIVE_ID, "name": "OneDrive"},
+                "/root": drive_item(FOLDER_ID, "root", folder=True),
+            }
+        )
+
+        resolved = resolve_source(client, source)
+
+        assert resolved.resolved
+        assert resolved.item_id == FOLDER_ID

@@ -9,6 +9,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from app.core.exceptions import GraphError, GraphRequestError
 from app.services.graph import share_link
 from app.services.graph.client import GraphClient
 
@@ -137,6 +138,74 @@ def resolve_shared_item(client: GraphClient, share_url: str) -> DriveItem:
     parent = payload.get("parentReference") or {}
 
     return _parse_item(payload, drive_id=str(parent.get("driveId") or ""))
+
+
+def fresh_download_url(client: GraphClient, *, drive_id: str, item_id: str) -> str:
+    """Ask Graph for a download URL minted right now.
+
+    Graph's pre-authorised URLs live about an hour, so the one attached to an
+    item during enumeration is worthless to a run that reaches that item later.
+    This is the one place that asks for a current one.
+
+    **`/content` is the primary route, and asking for the annotation is the
+    fallback.** That ordering is the fix for a live run that indexed nothing:
+    the previous version asked for the item with
+    `$select=id,@microsoft.graph.downloadUrl`, and `@microsoft.graph.downloadUrl`
+    is an *instance annotation* rather than a property. Graph does not reliably
+    return it under `$select`, so the lookup produced an item with no URL, the
+    code called that a permanent failure, and **every one of the 487 downloadable
+    files in SunRadia's Knowledge Base failed without a byte being fetched**.
+
+    `/content` has none of that fragility: it is defined for every file item and
+    answers `302` with a freshly minted pre-authorised URL. The redirect is read
+    rather than followed, so the bearer token never reaches the storage host —
+    which was the only reason `/content` was avoided in the first place.
+
+    The annotation is still tried second, because a drive that answers the item
+    read but not the redirect should not lose its files to an ordering choice.
+    """
+
+    location = None
+
+    try:
+        location = client.redirect_location(
+            f"/drives/{drive_id}/items/{item_id}/content"
+        )
+    except GraphError as exc:
+        # Keep the real reason: a 404 here means the item is gone, and that is
+        # worth reporting as itself rather than as "no download URL".
+        primary = exc
+    else:
+        primary = None
+
+        if location:
+            return str(location)
+
+    # Fallback: the item's own payload, asked for *without* `$select` so the
+    # annotation is not filtered out of the answer.
+    try:
+        payload = client.get(f"/drives/{drive_id}/items/{item_id}")
+    except GraphError:
+        if primary is not None:
+            raise primary from None
+        raise
+
+    url = payload.get("@microsoft.graph.downloadUrl")
+
+    if url:
+        return str(url)
+
+    if primary is not None:
+        raise primary
+
+    # Genuinely nothing to download. A folder, a OneNote notebook, or a
+    # cloud-only placeholder with no content stream — permanent, and named.
+    raise GraphRequestError(
+        f"Graph offers no content stream for item {item_id!r} "
+        f"({payload.get('name') or 'unnamed'}). It is most likely a folder, a "
+        "OneNote notebook, or an online-only item with no downloadable bytes.",
+        transient=False,
+    )
 
 
 def search_folder(

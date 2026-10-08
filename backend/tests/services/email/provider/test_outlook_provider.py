@@ -19,6 +19,7 @@ from app.core.exceptions import (
 )
 from app.services.email.provider.base import OutgoingAttachment, OutgoingEmail
 from app.services.email.provider.outlook_provider import (
+    WINDOW_PAGE_SIZE,
     OutlookEmailProvider,
     to_message,
 )
@@ -168,6 +169,102 @@ def test_listing_reads_the_named_mailbox() -> None:
 
     assert [message.message_id for message in messages] == ["AAMkAGI2"]
     assert f"/users/{MAILBOX}/messages" in seen[0][1]
+
+
+def test_a_window_is_pushed_into_the_query_rather_than_filtered_here() -> None:
+    """A month is asked of Graph, not sifted out of the newest page.
+
+    Without this the reporting path downloaded the newest 200 messages and
+    threw away everything outside the period — which for a period further back
+    than one page returns an empty month that looks like a quiet one.
+    """
+
+    captured: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "login.example" in str(request.url):
+            return _token(request)
+
+        captured.append(request.url)
+
+        return httpx.Response(200, json={"value": [MESSAGE_PAYLOAD]})
+
+    provider = _provider(handler)
+    provider.list_messages(
+        limit=500,
+        folder="sentitems",
+        since=datetime(2026, 8, 1, tzinfo=UTC),
+        until=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+
+    query = captured[0].params
+
+    assert query["$filter"] == (
+        "receivedDateTime ge 2026-08-01T00:00:00Z and "
+        "receivedDateTime lt 2026-09-01T00:00:00Z"
+    )
+    # A windowed listing carries bodies, so it pages at the provider's own
+    # windowed page size, whatever the caller asked for.
+    assert query["$top"] == str(WINDOW_PAGE_SIZE)
+    assert "/mailFolders/sentitems/messages" in captured[0].path
+
+
+def test_a_windowed_listing_follows_graphs_paging() -> None:
+    """One page is a screenful; a month is not.
+
+    Paging happens only for a windowed request — a plain listing is a screenful
+    by intent, and following its pages would read a whole mailbox to render a
+    table of twenty-five rows.
+    """
+
+    pages = [
+        httpx.Response(
+            200,
+            json={
+                "value": [MESSAGE_PAYLOAD],
+                "@odata.nextLink": "https://graph.example/v1.0/next-page",
+            },
+        ),
+        httpx.Response(200, json={"value": [{**MESSAGE_PAYLOAD, "id": "second"}]}),
+    ]
+    served: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "login.example" in str(request.url):
+            return _token(request)
+
+        served.append(request.url)
+
+        return pages[min(len(served) - 1, len(pages) - 1)]
+
+    provider = _provider(handler)
+    messages = provider.list_messages(limit=50, since=datetime(2026, 8, 1, tzinfo=UTC))
+
+    assert [message.message_id for message in messages] == ["AAMkAGI2", "second"]
+    assert str(served[1]).endswith("/next-page")
+
+
+def test_an_unwindowed_listing_reads_one_page_only() -> None:
+    served: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "login.example" in str(request.url):
+            return _token(request)
+
+        served.append(request.url)
+
+        return httpx.Response(
+            200,
+            json={
+                "value": [MESSAGE_PAYLOAD],
+                "@odata.nextLink": "https://graph.example/v1.0/next-page",
+            },
+        )
+
+    provider = _provider(handler)
+    provider.list_messages(limit=50)
+
+    assert len(served) == 1
 
 
 def test_a_thread_is_read_oldest_first() -> None:

@@ -28,6 +28,9 @@ from app.models.email import EmailAssessment
 from app.schemas.document_schema import ErrorResponse
 from app.schemas.task_schema import (
     AttendanceRequest,
+    CalendarImportRequest,
+    CalendarImportResponse,
+    CalendarStatusResponse,
     EventCreateRequest,
     EventListResponse,
     EventResponse,
@@ -38,7 +41,7 @@ from app.schemas.task_schema import (
     TaskUpdateRequest,
     WeeklyReportResponse,
 )
-from app.services.features.calendar import event_service
+from app.services.features.calendar import event_service, import_service
 from app.services.features.reports import weekly_report_service
 from app.services.features.tasks import email_task_service, task_service
 from app.services.features.tasks.urgency import TaskStatus
@@ -327,6 +330,74 @@ def delete_event(
     db: Session = Depends(get_db),
 ) -> None:
     event_service.delete_event(db, event_id, user_id=user.id)
+
+
+@router.get(
+    "/calendar/status",
+    response_model=CalendarStatusResponse,
+    summary="Whether this user's real calendar can be read",
+)
+def calendar_status(
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> CalendarStatusResponse:
+    """Probe Graph once and say what came back.
+
+    Under `/calendar/` rather than `/events/calendar/`: `/events/{event_id}` is
+    declared above and would match first, turning a status read into a 422 on
+    an unparsable UUID.
+
+    Never raises. "The application has no Calendars.Read consent" is the answer
+    most worth showing, and a screen that has to catch an exception to show it
+    will eventually not.
+    """
+
+    access = import_service.access(db, user_id=user.id)
+
+    return CalendarStatusResponse(
+        configured=access.configured,
+        connected=access.connected,
+        mailbox=access.mailbox,
+        detail=access.detail,
+        has_imported_events=import_service.has_imported_events(db, user_id=user.id),
+    )
+
+
+@router.post(
+    "/calendar/import",
+    response_model=CalendarImportResponse,
+    summary="Import this user's real meetings for a window",
+)
+def import_calendar(
+    request: CalendarImportRequest,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> CalendarImportResponse:
+    """Read Graph for a window and record what is there. Idempotent.
+
+    Explicit, and only ever for the calling user. Nothing here schedules
+    itself, follows up, or acts on a meeting — importing is reading, and every
+    row it writes is `scheduled` with attendance unanswered.
+
+    503 when there is no mailbox connected or no calendar consent: the request
+    was fine and the deployment cannot serve it yet, which is not the caller's
+    mistake.
+    """
+
+    result = import_service.import_events(
+        db, user_id=user.id, since=request.since, until=request.until
+    )
+
+    return CalendarImportResponse(
+        mailbox=result.mailbox,
+        since=result.since,
+        until=result.until,
+        created=result.created,
+        updated=result.updated,
+        unchanged=result.unchanged,
+        cancelled=result.cancelled,
+        total=result.total,
+    )
 
 
 @router.post(

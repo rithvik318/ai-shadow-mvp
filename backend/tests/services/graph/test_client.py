@@ -232,7 +232,16 @@ def test_a_resync_code_becomes_a_delta_expiry_whatever_the_status() -> None:
 
 def test_a_forbidden_response_becomes_an_auth_error() -> None:
     """403 from Graph almost always means missing admin consent, so the error
-    says so rather than leaving somebody to guess."""
+    says so rather than leaving somebody to guess — but it does **not** guess
+    *which* consent.
+
+    This client serves files, mail and calendar, three separate admin consents,
+    and it cannot see which one the caller was exercising. It used to assert
+    `Files.Read.All` unconditionally, which was right for a sync and wrong
+    everywhere else: the first real calendar 403 told the reader to re-grant a
+    files permission that could not have been the cause. Naming the consent is
+    the job of the layer that knows which API it called.
+    """
 
     transport = graph_transport(
         {"/drives/": (403, {"error": {"code": "accessDenied"}})}
@@ -241,7 +250,32 @@ def test_a_forbidden_response_becomes_an_auth_error() -> None:
     with pytest.raises(GraphAuthError) as error:
         _client(transport).get("/drives/d/root")
 
-    assert "Files.Read.All" in str(error.value)
+    message = str(error.value)
+
+    assert "403" in message
+    assert "accessDenied" in message
+    assert "granted per API" in message
+    assert "Files.Read.All" not in message
+
+
+def test_an_auth_error_carries_what_graph_answered() -> None:
+    """Structured, so a caller can compose an accurate remedy.
+
+    Parsing the sentence back out would be the alternative, and a message is
+    not an interface.
+    """
+
+    transport = graph_transport(
+        {"/drives/": (403, {"error": {"code": "accessDenied"}})}
+    )
+
+    with pytest.raises(GraphAuthError) as error:
+        _client(transport).get("/drives/d/root")
+
+    assert error.value.status_code == 403
+    assert error.value.graph_code == "accessDenied"
+    # Missing consent does not heal on a schedule.
+    assert error.value.transient is False
 
 
 def test_other_failures_become_request_errors() -> None:
@@ -479,3 +513,272 @@ def test_a_throttle_log_does_not_carry_the_query_string(
         _client(transport).get("/drives/d/items/i?token=super-secret")
 
     assert "super-secret" not in caplog.text
+
+
+# --- download classification ---------------------------------------------
+#
+# One bit — can this succeed next time — decides whether a synchronisation
+# withholds its delta token. Everything below pins one side of that line, and
+# every one of them describes a failure a real 847-file run actually met.
+
+
+def _download_transport(statuses: list[int], *, body: bytes = b"the bytes"):
+    """Answer each download attempt with the next status in the list."""
+
+    attempts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+
+        if TOKEN_URL_FRAGMENT in url:
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+
+        if "/drives/" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "i1",
+                    "@microsoft.graph.downloadUrl": "https://files.example/fresh",
+                },
+            )
+
+        attempts.append(url)
+        status = statuses[min(len(attempts) - 1, len(statuses) - 1)]
+
+        if status == 200:
+            return httpx.Response(200, content=body)
+
+        return httpx.Response(status, json={"error": {"code": "x"}})
+
+    return httpx.MockTransport(handler), attempts
+
+
+def test_an_expired_download_url_is_re_minted_and_retried() -> None:
+    """Graph's pre-authorised URLs live about an hour.
+
+    A sync that enumerates a folder and then downloads it is holding URLs from
+    before it started. Without this, every file reached after the first hour
+    failed — and the 403 read as a permissions problem rather than as a clock.
+    """
+
+    transport, attempts = _download_transport([403, 200])
+    client = _client(transport)
+
+    data = client.download(
+        "https://files.example/stale", refresh=lambda: "https://files.example/fresh"
+    )
+
+    assert data == b"the bytes"
+    assert attempts == ["https://files.example/stale", "https://files.example/fresh"]
+
+
+def test_a_refreshed_url_that_is_still_refused_is_permanent() -> None:
+    # The application genuinely cannot read this item. Retrying forever would
+    # hold the delta token back over a file nothing can open.
+    transport, attempts = _download_transport([403, 403])
+
+    with pytest.raises(GraphRequestError) as caught:
+        _client(transport).download(
+            "https://files.example/stale", refresh=lambda: "https://files.example/fresh"
+        )
+
+    assert caught.value.transient is False
+    assert len(attempts) == 2
+
+
+def test_a_download_with_no_refresher_does_not_invent_one() -> None:
+    transport, attempts = _download_transport([403])
+
+    with pytest.raises(GraphRequestError) as caught:
+        _client(transport).download("https://files.example/stale")
+
+    assert caught.value.transient is False
+    assert len(attempts) == 1
+
+
+def test_a_missing_file_is_permanent() -> None:
+    transport, _ = _download_transport([404])
+
+    with pytest.raises(GraphRequestError) as caught:
+        _client(transport).download("https://files.example/gone")
+
+    assert caught.value.transient is False
+
+
+def test_an_exhausted_throttle_is_transient(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The content was never seen, so the token must not move past it."""
+
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+
+    transport, _ = _download_transport([429])
+
+    with pytest.raises(GraphRequestError) as caught:
+        _client(transport).download("https://files.example/busy")
+
+    assert caught.value.transient is True
+
+
+def test_a_server_error_is_transient(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+
+    transport, _ = _download_transport([500])
+
+    with pytest.raises(GraphRequestError) as caught:
+        _client(transport).download("https://files.example/broken")
+
+    assert caught.value.transient is True
+
+
+def test_a_refusal_from_graph_itself_is_permanent() -> None:
+    """Missing admin consent does not heal on a schedule.
+
+    Retrying it nightly produces the same answer more often, which is how a
+    sync ends up re-walking a folder forever to collect one 403.
+    """
+
+    transport = graph_transport({"/root": (403, {"error": {"code": "accessDenied"}})})
+
+    with pytest.raises(GraphAuthError) as caught:
+        _client(transport).get("/drives/d/root")
+
+    assert caught.value.transient is False
+
+
+def test_the_total_retry_budget_bounds_one_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-attempt caps do not bound a run; the total does.
+
+    Five attempts each honouring a 60-second `Retry-After` is five minutes
+    inside one file. Several hundred throttled files turn that into a sync
+    measured in days — which is most of where 25 hours went.
+    """
+
+    slept: list[float] = []
+    monkeypatch.setattr("app.services.graph.client.time.sleep", slept.append)
+
+    transport, attempts = _throttle_then(200, retry_after="60", times=99)
+
+    with pytest.raises(GraphRequestError):
+        _client(transport).get("/drives/d/root")
+
+    assert sum(slept) <= 120.0
+    # It gave up on the budget rather than on the attempt count.
+    assert len(attempts) < 5
+
+
+# --- transport errors ----------------------------------------------------
+#
+# A dropped read is the most literal "not now" there is: no status came back at
+# all. It was nevertheless the one condition this client did not retry, so a
+# single `ReadError` on a single file marked an 800-file run `partial` and
+# withheld its delta token — a whole re-enumeration paid for a hiccup. That is
+# what happened to `Sun Radia Capabilities Case Studies and Services.pptx`.
+
+
+def _flaky_transport(failures: int, *, error: type[Exception] = httpx.ReadError):
+    """A transport that raises `failures` times, then answers normally."""
+
+    state = {"remaining": failures}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if TOKEN_URL_FRAGMENT in str(request.url):
+            return httpx.Response(
+                200, json={"access_token": "test-token", "expires_in": 3600}
+            )
+
+        if state["remaining"] > 0:
+            state["remaining"] -= 1
+            raise error("connection dropped")
+
+        return httpx.Response(200, json={"id": "recovered"})
+
+    return httpx.MockTransport(handler), state
+
+
+def test_a_dropped_read_is_retried_rather_than_failing_the_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+    transport, state = _flaky_transport(1)
+
+    assert _client(transport).get("/drives/d/items/i") == {"id": "recovered"}
+    assert state["remaining"] == 0
+
+
+def test_the_retry_backs_off_rather_than_hammering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """There is no `Retry-After` to honour, so the fallback has to be used."""
+
+    slept: list[float] = []
+    monkeypatch.setattr("app.services.graph.client.time.sleep", slept.append)
+    transport, _ = _flaky_transport(2)
+
+    _client(transport).get("/drives/d/items/i")
+
+    assert slept == sorted(slept)
+    assert all(wait > 0 for wait in slept)
+
+
+def test_a_connection_error_is_retried_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+    transport, _ = _flaky_transport(1, error=httpx.ConnectError)
+
+    assert _client(transport).get("/drives/d/items/i") == {"id": "recovered"}
+
+
+def test_a_transport_that_never_recovers_is_still_reported_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bytes were never seen, so the delta token must not move past it.
+
+    `transient` is the single bit that decides whether the token advances, and
+    getting it wrong here would bury the file rather than merely delay it.
+    """
+
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+    transport, _ = _flaky_transport(99)
+
+    with pytest.raises(GraphRequestError) as caught:
+        _client(transport).get("/drives/d/items/i")
+
+    assert caught.value.transient is True
+
+
+def test_the_failure_says_how_many_attempts_were_made(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+    transport, _ = _flaky_transport(99)
+
+    with pytest.raises(GraphRequestError) as caught:
+        _client(transport).get("/drives/d/items/i")
+
+    assert "attempt(s)" in str(caught.value)
+
+
+def test_a_download_that_drops_mid_read_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The path the pptx actually failed on."""
+
+    monkeypatch.setattr("app.services.graph.client.time.sleep", lambda _: None)
+    state = {"remaining": 1}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if TOKEN_URL_FRAGMENT in str(request.url):
+            return httpx.Response(
+                200, json={"access_token": "test-token", "expires_in": 3600}
+            )
+
+        if state["remaining"] > 0:
+            state["remaining"] -= 1
+            raise httpx.ReadError("connection dropped")
+
+        return httpx.Response(200, content=b"slide bytes")
+
+    assert (
+        _client(httpx.MockTransport(handler)).download("https://files.example/x")
+        == b"slide bytes"
+    )

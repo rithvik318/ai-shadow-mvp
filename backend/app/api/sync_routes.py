@@ -65,6 +65,7 @@ def sync_onedrive(
             replaced=summary.replaced,
             deleted=summary.deleted,
             unsupported=summary.unsupported,
+            ocr_required=summary.ocr_required,
             failed=summary.failed,
             duration_seconds=summary.duration_seconds,
             delta_advanced=summary.delta_advanced,
@@ -94,6 +95,7 @@ def sync_onedrive(
         total_unchanged=total("unchanged"),
         total_deleted=total("deleted"),
         total_unsupported=total("unsupported"),
+        total_ocr_required=total("ocr_required"),
         total_failed=total("failed"),
         duration_seconds=round(total("duration_seconds"), 3),
     )
@@ -140,6 +142,7 @@ def _state_response(
             last_unchanged=0,
             last_deleted=0,
             last_unsupported=0,
+            last_ocr_required=0,
             last_failed=0,
         )
 
@@ -166,6 +169,7 @@ def _state_response(
             + state.last_unchanged
             + state.last_deleted
             + state.last_unsupported
+            + state.last_ocr_required
             + state.last_failed
         ),
         last_indexed=state.last_indexed,
@@ -173,6 +177,7 @@ def _state_response(
         last_unchanged=state.last_unchanged,
         last_deleted=state.last_deleted,
         last_unsupported=state.last_unsupported,
+        last_ocr_required=state.last_ocr_required,
         last_failed=state.last_failed,
     )
 

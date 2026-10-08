@@ -153,10 +153,13 @@ export function SyncPanel({ onSynced }: { onSynced: () => void }) {
                   <span className="text-ink-800">
                     {formatDateTime(totals.lastSyncedAt)}
                   </span>
-                  {totals.unsupported > 0 || totals.failed > 0 ? (
+                  {totals.unsupported > 0 ||
+                  totals.ocrRequired > 0 ||
+                  totals.failed > 0 ? (
                     <>
                       {" · "}
-                      {totals.unsupported} unsupported, {totals.failed} failed
+                      {totals.unsupported} unsupported, {totals.ocrRequired} need OCR,{" "}
+                      {totals.failed} failed
                     </>
                   ) : null}
                 </p>
@@ -259,6 +262,9 @@ export function SyncPanel({ onSynced }: { onSynced: () => void }) {
                     <Pair label="Updated" value={String(source.replaced)} />
                     <Pair label="Deleted" value={String(source.deleted)} />
                     <Pair label="Unsupported" value={String(source.unsupported)} />
+                    {/* Scans. Named apart from failures because nothing went
+                        wrong with them and retrying cannot help. */}
+                    <Pair label="Needs OCR" value={String(source.ocrRequired)} />
                     <Pair label="Failed" value={String(source.failed)} />
                   </dl>
                   <p className="mt-2 text-xs text-ink-500">
@@ -276,7 +282,8 @@ export function SyncPanel({ onSynced }: { onSynced: () => void }) {
                 {lastRun.total_discovered === 1 ? "" : "s"} examined —{" "}
                 {lastRun.total_indexed} added, {lastRun.total_replaced} updated,{" "}
                 {lastRun.total_unchanged} unchanged, {lastRun.total_deleted} deleted,{" "}
-                {lastRun.total_unsupported} unsupported, {lastRun.total_failed} failed.
+                {lastRun.total_unsupported} unsupported, {lastRun.total_ocr_required}{" "}
+                need OCR, {lastRun.total_failed} failed.
               </p>
             ) : null}
           </div>

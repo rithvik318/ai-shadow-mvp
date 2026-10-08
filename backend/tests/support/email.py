@@ -35,6 +35,18 @@ from app.services.email.provider.base import (
 from app.services.engines.analysis.analysis_engine import analysis_engine
 
 
+def _within(
+    message: EmailMessage, since: datetime | None, until: datetime | None
+) -> bool:
+    if message.received_at is None:
+        return True
+
+    if since is not None and message.received_at < since:
+        return False
+
+    return not (until is not None and message.received_at >= until)
+
+
 class RecordingProvider:
     """A provider that records what it was asked to do.
 
@@ -55,6 +67,9 @@ class RecordingProvider:
         self.name = name
         self.sent: list[OutgoingEmail] = []
         self.drafted: list[OutgoingEmail] = []
+        #: Every listing this provider was asked for, so a test can assert that
+        #: a caller bounded its request rather than reading the whole mailbox.
+        self.listed: list[dict[str, object]] = []
         self._messages = messages or []
         self._fail_with = fail_with
         self._message_id = message_id
@@ -68,13 +83,32 @@ class RecordingProvider:
         )
 
     def list_messages(
-        self, *, limit: int = 25, folder: str | None = None
+        self,
+        *,
+        limit: int = 25,
+        folder: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[EmailMessage]:
+        # A listing with no folder is the inbox, not the whole mailbox. The
+        # laxer version made a message in `sentitems` come back from the
+        # default listing too, which no mailbox does — and which hid a report
+        # that never read the sent folder at all.
+        #
+        # The window is honoured here for the same reason: a double that
+        # ignores `since`/`until` cannot tell a caller that asks for a period
+        # apart from one that asks for everything, and the caller under test is
+        # the one that asks for a period.
         selected = [
             message
             for message in self._messages
-            if folder is None or message.folder == folder
+            if (
+                message.folder == folder
+                or (folder is None and message.folder in (None, "inbox"))
+            )
+            and _within(message, since, until)
         ]
+        self.listed.append({"folder": folder, "since": since, "until": until})
 
         return selected[:limit]
 

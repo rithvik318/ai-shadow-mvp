@@ -193,6 +193,15 @@ export function WeeklyReportPanel() {
                   api.markAttendance(userId, event.id, status),
                 )
               }
+              onImport={() =>
+                act("calendar:import", () =>
+                  api.importCalendar(
+                    userId,
+                    report.period_start,
+                    report.period_end,
+                  ),
+                )
+              }
             />
 
             <FollowUps items={report.follow_ups} />
@@ -429,16 +438,27 @@ function Events({
   report,
   busy,
   onMark,
+  onImport,
 }: {
   report: WeeklyReport;
   busy: string | null;
   onMark: (event: CalendarEvent, status: EventStatus) => void;
+  onImport: () => void;
 }) {
   return (
     <div>
       <SectionHeading
         title="Meetings"
         description="Attendance is only ever what somebody recorded — never inferred from a meeting existing."
+        actions={
+          <Button
+            type="button"
+            onClick={onImport}
+            disabled={busy === "calendar:import"}
+          >
+            {busy === "calendar:import" ? "Importing…" : "Import from Outlook"}
+          </Button>
+        }
       />
 
       {/* Said plainly rather than implied by an empty list: "no meetings" and

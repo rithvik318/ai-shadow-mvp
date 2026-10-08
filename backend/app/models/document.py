@@ -5,6 +5,7 @@ from enum import StrEnum
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
+    BigInteger,
     DateTime,
     ForeignKey,
     Index,
@@ -32,6 +33,16 @@ class DocumentStatus(StrEnum):
     so a sync source that records it can stop offering it. Only ingestion
     carrying a `source_uri` persists this state — a manual upload of an
     unsupported file is still rejected outright, leaving no row.
+
+    `ocr_required` is a third thing again, and conflating it with either was
+    misleading about 30 files in the SunRadia corpus. The format *is*
+    supported, the bytes *were* read, and the parser ran to completion — the
+    document simply has no text layer, because it is a scan or a deck of
+    images. Retrying will never change that, so it is not `failed`; a parser
+    for its format already exists, so it is not `unsupported`. What it needs is
+    optical character recognition, which this application does not do, and
+    naming that separately is what lets a corpus report say "these many need
+    OCR" instead of burying them in a failure count.
     """
 
     PENDING = "pending"
@@ -39,6 +50,7 @@ class DocumentStatus(StrEnum):
     INDEXED = "indexed"
     FAILED = "failed"
     UNSUPPORTED = "unsupported"
+    OCR_REQUIRED = "ocr_required"
 
 
 class IngestionResult(StrEnum):
@@ -57,6 +69,7 @@ class IngestionResult(StrEnum):
     REPLACED = "replaced"
     FAILED = "failed"
     UNSUPPORTED = "unsupported"
+    OCR_REQUIRED = "ocr_required"
 
 
 SUCCESSFUL_INGESTION_RESULTS = frozenset(
@@ -102,7 +115,16 @@ class Document(Base):
 
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
-    file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    # BIGINT, and the reason is that this column does **not** hold the size of
+    # something this application accepted. A file rejected for being too large
+    # is still recorded — that is what makes the corpus able to say what it is
+    # missing — and the size recorded is the one OneDrive reported, which is
+    # bounded by the drive rather than by `MAX_UPLOAD_SIZE_BYTES`. A 6.8 GB
+    # Teams recording in the Knowledge Base folder overflowed `INTEGER` and
+    # aborted the whole sync transaction. SQLite's INTEGER is 64-bit, so the
+    # entire suite passed while PostgreSQL raised `integer out of range` — the
+    # same shape as the VARCHAR-width bug migration 0013 fixed.
+    file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     # --- source identity -------------------------------------------------
     #

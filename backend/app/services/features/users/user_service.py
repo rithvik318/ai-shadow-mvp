@@ -1,9 +1,15 @@
 """Creating and finding the people the Shadow can answer for.
 
-Create and list, and nothing else. There is no update and no delete: an
-identity that other rows point at should not be editable through the same API
-that exists to make two test users, and deleting one would cascade a Digital
-Twin away behind a single request.
+Create and list. There is no update endpoint and no delete here: an identity
+that other rows point at should not be editable through the same API that
+exists to make two test users, and deleting one would cascade a Digital Twin
+away behind a single request. Deleting is `deletion_service`, which is explicit
+about what it removes.
+
+A user's displayed name and role do change, through exactly one path: saving
+their own Digital Twin profile, which writes the same two fields — see
+`digital_twin.profile_service._apply_to_identity`. That is a person renaming
+themselves, not an API for editing identities.
 """
 
 import logging

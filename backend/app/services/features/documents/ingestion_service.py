@@ -27,6 +27,7 @@ from app.core.exceptions import (
     DocumentTooLargeError,
     EmbeddingError,
     EmptyDocumentError,
+    NoTextLayerError,
     UnsupportedDocumentTypeError,
 )
 from app.models.document import (
@@ -182,9 +183,15 @@ def _ingest(
     ):
         # Same bytes, already indexed. Re-parsing and re-embedding would cost
         # money to produce the rows that are already there.
+        # `document_filename`, not `filename`: `filename` is an attribute
+        # `logging` sets on every record, and passing it through `extra`
+        # raises `KeyError: Attempt to overwrite 'filename' in LogRecord` the
+        # moment INFO is actually enabled. It went unnoticed while nothing
+        # configured the root logger, because the call returned before it
+        # built a record.
         logger.info(
             "document_ingest_skipped_unchanged",
-            extra={"document_id": str(existing.id), "filename": filename},
+            extra={"document_id": str(existing.id), "document_filename": filename},
         )
         return existing, IngestionResult.UNCHANGED, None
 
@@ -218,6 +225,22 @@ def _ingest(
     try:
         parsed = parse_document(data, filename, content_type)
         chunks = chunk_document(parsed)
+    except NoTextLayerError as exc:
+        # A scan, and the one document error that is not a fault. The download
+        # worked and the parser ran; the file simply holds no text. Recorded
+        # here rather than in `ingest_file` so that both entry points agree —
+        # the single-upload endpoint still raises and still answers 422, while
+        # a synchronised file gets a durable row saying what it needs.
+        #
+        # Old chunks are kept for the same reason a parse failure keeps them:
+        # retrieval reads only `indexed` documents, so nothing stale is
+        # reachable, and emptying a document because today's version is a scan
+        # of it would lose text the corpus still has.
+        document.status = DocumentStatus.OCR_REQUIRED
+        document.error_message = str(exc)
+        db.commit()
+        db.refresh(document)
+        return document, IngestionResult.OCR_REQUIRED, exc
     except DocumentError as exc:
         # Deliberately before the old chunks are dropped. A re-index whose new
         # content will not parse leaves the previous chunks in place rather
@@ -320,16 +343,17 @@ def ingest_document(
     return document
 
 
-def _record_unsupported(
+def record_unsupported_source(
     db: Session,
     *,
-    data: bytes,
     filename: str,
     content_type: str | None,
     user_id: str,
     source_uri: str | None,
     source_version: str | None,
     reason: str,
+    size_bytes: int = 0,
+    digest: str | None = None,
 ) -> IngestionOutcome:
     """Report an unsupported file, persisting it only if it has a source.
 
@@ -337,6 +361,15 @@ def _record_unsupported(
     convert it. A *synced* `.doc` is different — without a record, every sync
     run would rediscover and re-reject it forever, and nothing would be able to
     show which corpus files the knowledge base is missing.
+
+    **`digest` is optional because the bytes may never have been fetched.** A
+    format is decided by name and declared type, both of which a synchronisation
+    knows before it downloads anything, so the sensible thing to do with a
+    `.doc` is record it and move on — downloading several hundred megabytes in
+    order to reject it on its extension is work with no possible outcome. A row
+    written that way has no content hash, which is honest: nothing has read the
+    file. `source_version` still changes when the file does, so a `.doc` that is
+    later saved as `.docx` is picked up on the next run.
     """
 
     if source_uri is None:
@@ -351,8 +384,8 @@ def _record_unsupported(
             user_id=user_id,
             filename=filename,
             content_type=content_type or "application/octet-stream",
-            file_size_bytes=len(data),
-            content_hash=content_digest(data) if data else None,
+            file_size_bytes=size_bytes,
+            content_hash=digest,
             source_uri=source_uri,
             source_version=source_version,
             status=DocumentStatus.UNSUPPORTED,
@@ -367,8 +400,8 @@ def _record_unsupported(
         _drop_chunks(db, document)
         document.filename = filename
         document.content_type = content_type or "application/octet-stream"
-        document.file_size_bytes = len(data)
-        document.content_hash = content_digest(data) if data else None
+        document.file_size_bytes = size_bytes
+        document.content_hash = digest
         document.source_version = source_version
         document.status = DocumentStatus.UNSUPPORTED
         document.error_message = reason
@@ -380,6 +413,70 @@ def _record_unsupported(
     return IngestionOutcome(
         filename=filename,
         result=IngestionResult.UNSUPPORTED,
+        document_id=document.id,
+        status=document.status,
+        reason=reason,
+    )
+
+
+def record_failed_source(
+    db: Session,
+    *,
+    filename: str,
+    content_type: str | None,
+    user_id: str,
+    source_uri: str,
+    source_version: str | None,
+    reason: str,
+    size_bytes: int = 0,
+) -> IngestionOutcome:
+    """Record a synchronised file whose bytes could not be fetched.
+
+    Until this existed, a download failure left **no trace at all**: the run
+    reported a count and nothing else, so "which 487 files failed, and why"
+    could not be answered from the database. That is the difference between a
+    number and a diagnosis, and it is what made a live run reporting 487
+    failures impossible to act on.
+
+    The row is `failed` rather than `unsupported` on purpose. The distinction is
+    already the one `DocumentStatus` draws: `unsupported` will never succeed
+    until a parser exists, while `failed` is something this system tried and
+    could not finish — and a download that Graph refused may well succeed on the
+    next run. `content_hash` stays null, because nothing read the file.
+
+    Existing chunks are deliberately **not** dropped. A document that indexed
+    last week and whose download failed today should keep answering queries; the
+    alternative is that one bad night empties the corpus.
+    """
+
+    document = _find_existing(db, user_id=user_id, source_uri=source_uri, digest=None)
+
+    if document is None:
+        document = Document(
+            user_id=user_id,
+            filename=filename,
+            content_type=content_type or "application/octet-stream",
+            file_size_bytes=size_bytes,
+            source_uri=source_uri,
+            source_version=source_version,
+            status=DocumentStatus.FAILED,
+            chunk_count=0,
+            error_message=reason,
+        )
+        db.add(document)
+    else:
+        document.filename = filename
+        document.content_type = content_type or document.content_type
+        document.file_size_bytes = size_bytes or document.file_size_bytes
+        document.status = DocumentStatus.FAILED
+        document.error_message = reason
+
+    db.commit()
+    db.refresh(document)
+
+    return IngestionOutcome(
+        filename=filename,
+        result=IngestionResult.FAILED,
         document_id=document.id,
         status=document.status,
         reason=reason,
@@ -415,15 +512,16 @@ def ingest_file(
             source_version=source_version,
         )
     except UnsupportedDocumentTypeError as exc:
-        return _record_unsupported(
+        return record_unsupported_source(
             db,
-            data=data,
             filename=filename,
             content_type=content_type,
             user_id=user_id,
             source_uri=source_uri,
             source_version=source_version,
             reason=str(exc),
+            size_bytes=len(data),
+            digest=content_digest(data) if data else None,
         )
     except DocumentError as exc:
         # Empty or oversized: rejected before a row existed, so there is
@@ -447,7 +545,14 @@ def ingest_file(
     if error is not None:
         return IngestionOutcome(
             filename=filename,
-            result=IngestionResult.FAILED,
+            # A missing text layer is not a failure of this application, and
+            # counting it as one is what made thirty scans look like thirty
+            # defects. Everything else here is.
+            result=(
+                IngestionResult.OCR_REQUIRED
+                if isinstance(error, NoTextLayerError)
+                else IngestionResult.FAILED
+            ),
             document_id=document.id,
             status=document.status,
             reason=str(error),

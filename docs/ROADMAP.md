@@ -90,8 +90,22 @@ a completion, and is wrapped in the frontend API layer ready to be surfaced. The
 
 ## Deliberately deferred
 
-Autonomous agents, CRM, calendar, LangGraph and n8n — deferred entirely, including partial or exploratory versions.
+Autonomous agents, CRM, LangGraph and n8n — deferred entirely, including partial or exploratory versions. The calendar is now read on request (see `FEATURES.md`); everything autonomous about it — scheduling, automatic import, acting on a meeting — stays deferred.
 
 Email is built, but the autonomous half of it is not and is not planned: scheduled sends, automatic replies, background triage sweeps and anything that contacts a person without an explicit approval. The provider boundary makes those possible to add; nothing about the current design assumes they will be.
 
 The AI Orchestrator, the conversation/task memory system, and the tool architecture are all designed in the reference repository and none of them are needed for the MVP sentence above. They should not be built until something concretely requires them.
+
+### Optical character recognition for scanned documents
+
+Deferred deliberately, and now visible rather than buried. Documents whose
+format is supported and which hold no text layer are recorded `ocr_required`
+with the tag `OCR_REQUIRED / NO_TEXT_LAYER`, so the backlog is a query rather
+than an inference — `scripts/diagnose_onedrive_corpus.py` lists them by name.
+There are 30 in the SunRadia corpus.
+
+Whatever implements this belongs behind the existing parser boundary: a
+`_parse_*` function's contract is bytes in, `ParsedSection`s out, and OCR is
+that contract with a slower implementation. It is out of scope until the
+normal retrieval pipeline is accepted, because a text layer nobody has to
+generate is the cheaper source of every answer.

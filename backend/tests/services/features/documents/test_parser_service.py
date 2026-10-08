@@ -24,11 +24,13 @@ from tests.fixtures.factories import (
     build_docx_table_with_text_box,
     build_docx_table_with_wrapped_runs,
     build_docx_wrapped_runs,
+    build_html,
     build_markdown,
     build_pdf,
     build_pptx,
     build_pptx_merged_table,
     build_text,
+    build_xlsx,
 )
 
 PDF_TYPE = "application/pdf"
@@ -87,7 +89,7 @@ def test_resolve_format_ignores_content_type_parameters() -> None:
     [
         ("archive.zip", "application/zip"),
         ("image.png", "image/png"),
-        ("sheet.xlsx", "application/vnd.ms-excel"),
+        ("legacy.xls", "application/vnd.ms-excel"),
         ("noextension", None),
     ],
 )
@@ -1233,3 +1235,140 @@ def test_parsed_document_text_joins_all_sections() -> None:
     )
 
     assert parsed.text == "first\n\nsecond"
+
+
+# --- HTML ----------------------------------------------------------------
+#
+# Parsed with the standard library rather than BeautifulSoup: the job is
+# "collect text, notice headings", and this repository has already once
+# regretted taking a dependency to avoid thirty lines.
+
+
+def test_html_is_split_on_its_headings() -> None:
+    parsed = parse_document(
+        build_html([("Capabilities", "Solar EPC."), ("Team", "Ten engineers.")]),
+        "page.html",
+        "text/html",
+    )
+
+    assert [section.section_title for section in parsed.sections] == [
+        "Capabilities",
+        "Team",
+    ]
+    assert parsed.sections[0].text == "Solar EPC."
+
+
+def test_html_does_not_index_the_page_s_own_source() -> None:
+    """Script and style hold code, not prose.
+
+    Indexing a page's JavaScript makes every page on a site look similar to
+    every other, which is a retrieval result that matches everything.
+    """
+
+    parsed = parse_document(
+        build_html([("Capabilities", "Solar EPC.")], script="var tracking = 1;"),
+        "page.html",
+        "text/html",
+    )
+
+    assert "tracking" not in parsed.text
+    assert "color: red" not in parsed.text
+
+
+def test_html_does_not_run_words_together_across_tags() -> None:
+    parsed = parse_document(
+        b"<html><body><p>first</p><p>second</p></body></html>", "a.html", "text/html"
+    )
+
+    assert "firstsecond" not in parsed.text
+    assert "first second" in parsed.text
+
+
+def test_html_with_no_text_is_rejected_rather_than_indexed_empty() -> None:
+    with pytest.raises(EmptyDocumentError):
+        parse_document(
+            b"<html><body><script>x=1</script></body></html>", "a.html", None
+        )
+
+
+# --- spreadsheets --------------------------------------------------------
+
+
+def test_each_worksheet_becomes_its_own_section() -> None:
+    parsed = parse_document(
+        build_xlsx(
+            {
+                "Pipeline": [["Client", "Stage"], ["Tech Park", "Design"]],
+                "Costs": [["Item", "Amount"], ["Panels", "120000"]],
+            }
+        ),
+        "book.xlsx",
+        None,
+    )
+
+    assert [section.section_title for section in parsed.sections] == [
+        "Pipeline",
+        "Costs",
+    ]
+
+
+def test_spreadsheet_rows_keep_their_column_labels() -> None:
+    """A chunk boundary can fall anywhere, and a row separated from its header
+    row is unreadable. Header-qualified rows survive the cut."""
+
+    parsed = parse_document(
+        build_xlsx({"Pipeline": [["Client", "Stage"], ["Tech Park", "Design"]]}),
+        "book.xlsx",
+        None,
+    )
+
+    assert "Client: Tech Park | Stage: Design" in parsed.text
+
+
+def test_an_empty_worksheet_contributes_no_section() -> None:
+    parsed = parse_document(
+        build_xlsx({"Pipeline": [["Client"], ["Tech Park"]], "Blank": []}),
+        "book.xlsx",
+        None,
+    )
+
+    assert [section.section_title for section in parsed.sections] == ["Pipeline"]
+
+
+def test_a_corrupt_spreadsheet_is_a_parse_failure_not_an_unsupported_type() -> None:
+    """The distinction decides whether the file gets a row to inspect.
+
+    A `.xlsx` full of junk is a document that failed; a `.doc` is a format
+    nothing will ever read. Only the first is worth showing an error against.
+    """
+
+    with pytest.raises(DocumentParseError):
+        parse_document(b"not a spreadsheet at all", "book.xlsx", None)
+
+
+def test_an_empty_workbook_is_rejected_rather_than_indexed_empty() -> None:
+    with pytest.raises(EmptyDocumentError):
+        parse_document(build_xlsx({"Blank": []}), "book.xlsx", None)
+
+
+# --- formats we recognise and refuse -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("filename", "remedy"),
+    [
+        ("Proposal.doc", ".docx"),
+        ("Costs.xls", ".xlsx"),
+        ("Deck.ppt", ".pptx"),
+        ("Plan.mmap", "PDF or DOCX"),
+    ],
+)
+def test_a_legacy_format_is_refused_with_its_remedy(filename: str, remedy: str) -> None:
+    """Naming the conversion is the difference between a list of rejects and a
+    list of tasks. Half-parsing a binary would be worse than either — it
+    produces a document of wrong characters that then gets embedded and cited."""
+
+    with pytest.raises(UnsupportedDocumentTypeError) as caught:
+        resolve_format(filename, "application/octet-stream")
+
+    assert remedy in str(caught.value)

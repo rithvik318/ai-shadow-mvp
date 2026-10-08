@@ -79,7 +79,7 @@ export function UploadTray({ onIngested }: { onIngested: () => void }) {
           type="file"
           multiple
           className="sr-only"
-          accept=".pdf,.docx,.pptx,.txt,.md,.markdown"
+          accept=".pdf,.docx,.pptx,.xlsx,.xlsm,.html,.htm,.txt,.md,.markdown"
           onChange={(event: ChangeEvent<HTMLInputElement>) =>
             onSelect(event.target.files)
           }

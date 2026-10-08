@@ -18,6 +18,7 @@ pgvector
 pypdf
 python-docx
 python-pptx
+openpyxl
 langchain-text-splitters
 
 # LLM provider (used by the retrieval/chat feature; see docs/ROADMAP.md)

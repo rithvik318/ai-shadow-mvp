@@ -61,6 +61,21 @@ class EmptyDocumentError(DocumentError):
     """Raised when an upload contains no bytes, or no extractable text."""
 
 
+class NoTextLayerError(EmptyDocumentError):
+    """Raised when a readable file of a supported format holds no text.
+
+    A scan, a photographed page, a deck of images. Deliberately narrower than
+    its parent: a zero-byte upload and a missing filename are also
+    `EmptyDocumentError`, and those *are* the caller's mistake, whereas this is
+    a property of the document. Only this one earns a persisted
+    `ocr_required` row and an exemption from the failure count, so the two must
+    be distinguishable by type rather than by reading the message.
+
+    A subclass rather than a sibling so that every existing handler — the 422
+    in `app/main.py` included — keeps working unchanged.
+    """
+
+
 class DocumentParseError(DocumentError):
     """Raised when a document is the right type but cannot be read."""
 
@@ -156,6 +171,17 @@ class EventValidationError(CalendarError):
     """Raised when an event's own details do not make sense."""
 
 
+class CalendarUnavailableError(CalendarError):
+    """Raised when a real calendar cannot be read for this user.
+
+    No mailbox connected, no Graph configuration, or a window that is not a
+    window. Deliberately distinct from returning an empty result: a caller
+    cannot tell "nothing was scheduled" from "nothing was read", and a report
+    that reported the second as the first would be claiming a calendar it never
+    reached.
+    """
+
+
 class SourceUnresolvableError(SyncError):
     """Raised when a configured folder cannot be turned into a drive item.
 
@@ -187,7 +213,41 @@ class SyncAlreadyRunningError(SyncError):
 
 
 class GraphError(SyncError):
-    """Base class for failures talking to Microsoft Graph."""
+    """Base class for failures talking to Microsoft Graph.
+
+    Carries whether repeating the request could plausibly succeed. That single
+    bit decides whether a synchronisation withholds its delta token, so getting
+    it wrong is expensive in one direction and dangerous in the other: calling a
+    permanent failure transient means the token never advances and the whole
+    folder is re-walked forever, while calling a transient one permanent means a
+    file whose bytes were never fetched is recorded as dealt with.
+
+    It defaults to `True` because the layer that raises is the only one that
+    knows the status code, and a caller that has not been told should assume the
+    cautious answer rather than quietly move the token past a file it never saw.
+    """
+
+    transient: bool = True
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        transient: bool | None = None,
+        status_code: int | None = None,
+        graph_code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+
+        if transient is not None:
+            self.transient = transient
+
+        #: What Graph answered, kept structured as well as in the message.
+        #: A caller that knows *which* API it was calling can compose an
+        #: accurate remedy from these; the client cannot, because it does not
+        #: know whether the request was for a file, a message or a meeting.
+        self.status_code = status_code
+        self.graph_code = graph_code
 
 
 class GraphAuthError(GraphError):
@@ -196,7 +256,13 @@ class GraphAuthError(GraphError):
     Separate from a transport failure because the remedy is different: a
     token that will not mint again is a configuration problem, and retrying
     it on a schedule only produces the same answer more often.
+
+    Permanent for exactly that reason. Missing admin consent does not heal on a
+    schedule, and treating it as transient is how a sync ends up re-walking a
+    folder nightly to collect the same 403.
     """
+
+    transient: bool = False
 
 
 class GraphRequestError(GraphError):

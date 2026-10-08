@@ -1,9 +1,10 @@
+import hmac
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app.api.chat_routes import router as chat_router
 from app.api.document_routes import router as document_router
@@ -22,6 +23,7 @@ from app.core.exceptions import (
     AnalysisValidationError,
     BatchTooLargeError,
     CalendarError,
+    CalendarUnavailableError,
     DigitalTwinError,
     DocumentError,
     DocumentNotFoundError,
@@ -52,6 +54,7 @@ from app.core.exceptions import (
     MemoryNotFoundError,
     MissingIdentityError,
     NotAuthorisedError,
+    NoTextLayerError,
     ProfileIncompleteError,
     ProfileNotFoundError,
     ReportError,
@@ -233,6 +236,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await digest_scheduler.stop()
 
 
+# Configured here rather than left to whoever imports the app, because
+# `logging`'s default root level is WARNING: every INFO line in this codebase
+# was written and then dropped, which is why a report that took minutes left
+# one context-free warning in the log and nothing else. `force=False` keeps a
+# deployment that configures its own handlers in charge.
+logging.basicConfig(
+    level=settings.LOG_LEVEL.upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+
 app = FastAPI(
     title=settings.APP_NAME,
     description=(
@@ -243,6 +256,50 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+#: Header the reverse proxy sets, and the paths that never need it. `/health`
+#: is exempt because the platform's health check calls the service directly.
+ORIGIN_SECRET_HEADER = "x-origin-secret"
+_ORIGIN_SECRET_EXEMPT_PATHS = frozenset({"/health"})
+
+
+@app.middleware("http")
+async def require_origin_secret(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """Refuse requests that did not come through the deployment's proxy.
+
+    Read per request rather than at import, so the setting can change without
+    a code path that caches it. The comparison is constant-time, and neither
+    the expected nor the supplied value is ever logged.
+    """
+
+    configured = settings.ORIGIN_SECRET
+    expected = configured.get_secret_value() if configured is not None else ""
+
+    if not expected or request.url.path in _ORIGIN_SECRET_EXEMPT_PATHS:
+        return await call_next(request)
+
+    supplied = request.headers.get(ORIGIN_SECRET_HEADER, "")
+
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        logger.warning(
+            "origin_secret_rejected path=%s present=%s",
+            request.url.path,
+            bool(supplied),
+        )
+
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "This API is only reachable through its proxy.",
+                "error": "OriginNotAllowed",
+            },
+        )
+
+    return await call_next(request)
+
+
 register_default_prompts()
 
 # Domain errors are mapped to status codes in one place so that routes and
@@ -252,6 +309,7 @@ _DOCUMENT_ERROR_STATUS: list[tuple[type[DocumentError], int]] = [
     (DocumentTooLargeError, 413),
     (BatchTooLargeError, 413),
     (UnsupportedDocumentTypeError, 415),
+    (NoTextLayerError, 422),
     (EmptyDocumentError, 422),
     (DocumentParseError, 422),
 ]
@@ -479,6 +537,9 @@ async def handle_report_error(request: Request, exc: ReportError) -> JSONRespons
 _CALENDAR_ERROR_STATUS: list[tuple[type[CalendarError], int]] = [
     (EventNotFoundError, 404),
     (EventValidationError, 422),
+    # 503: the request was fine and the deployment cannot serve it yet — no
+    # mailbox connected, or no calendar consent. A 4xx would blame the caller.
+    (CalendarUnavailableError, 503),
 ]
 
 

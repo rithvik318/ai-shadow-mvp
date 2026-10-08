@@ -17,36 +17,54 @@ out of services. The digests are snapshotted in `generation_service`, because
 the scheduler generates those unattended and must not depend on the API.
 """
 
+import logging
+import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import CurrentUser
 from app.api.renderers import weekly_report_response
-from app.core.exceptions import ReportPeriodError
+from app.config.settings import settings
+from app.core.exceptions import EmailProviderNotConfiguredError, ReportPeriodError
 from app.database.session import get_db
 from app.models.report import GeneratedReport, ReportStatus, ReportType
 from app.schemas.document_schema import ErrorResponse
 from app.schemas.report_schema import (
+    ActivityReportPendingResponse,
+    ActivityReportResponse,
+    ActivitySource,
     PeriodResponse,
     ReportEnvelope,
     ReportHistoryResponse,
     ReportSummaryResponse,
 )
+from app.services.features.email import mailbox_config_service
 from app.services.features.reports import (
+    activity_service,
     document_service,
     generation_service,
     report_store,
     weekly_report_service,
 )
+from app.services.features.reports.activity_store import Policy, ReportBeingGenerated
 from app.services.features.reports.period import (
     Period,
+    PeriodKind,
     current,
     parse_key,
     preceding,
+    range_between,
+    to_date,
 )
+from app.services.features.tasks import task_service
+from app.services.llm.client import llm_configured
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -192,6 +210,89 @@ def _weekly_work(
         detail=row.detail,
         content=dict(row.content or {}),
     )
+
+
+def _resolve_activity_period(
+    start: date | None, end: date | None, *, now: datetime
+) -> Period:
+    """Turn two optional dates into the window the report covers.
+
+    Neither given means "this month so far", which is the request the product
+    is most often asked for and the one the old period model could not express.
+    `end` is a date the caller means inclusively, so it is widened to the end of
+    that day — a report for "1 to 13 September" that stopped at midnight on the
+    13th would silently omit the day the reader asked about.
+    """
+
+    if start is None and end is None:
+        return to_date(PeriodKind.MONTH, now)
+
+    first = (
+        datetime(start.year, start.month, start.day, tzinfo=UTC)
+        if start is not None
+        else datetime(now.year, now.month, 1, tzinfo=UTC)
+    )
+    # An open-ended request runs to the end of *today*, not to this instant.
+    # The window is the identity of a stored report, and a window ending at
+    # `now` is a different window on every request — which would mean the
+    # current week could never be read from storage, because no two requests
+    # would ever ask for the same one. Ending on a day boundary makes
+    # "September so far" the same question all day; no mail can arrive from
+    # the future, so the evidence is identical either way.
+    last = (
+        datetime(end.year, end.month, end.day, tzinfo=UTC) + timedelta(days=1)
+        if (end is not None)
+        else datetime(now.year, now.month, now.day, tzinfo=UTC) + timedelta(days=1)
+    )
+
+    try:
+        return range_between(first, last)
+    except ValueError as exc:
+        raise ReportPeriodError("A reporting period must end after it starts.") from exc
+
+
+def _mailbox_for(db: Session, *, user_id: uuid.UUID):
+    """The provider and address this user's report reads."""
+
+    address = mailbox_config_service.resolve_address(db, user_id=user_id)
+
+    if not address:
+        raise EmailProviderNotConfiguredError(
+            "No mailbox is connected for this user, so there is no "
+            "correspondence to report on. Connect one with PUT /email/mailbox."
+        )
+
+    return mailbox_config_service.provider_for(db, user_id=user_id), address
+
+
+def _task_context(db: Session, *, user_id: uuid.UUID, period: Period) -> str:
+    """Tasks as supplementary evidence, said plainly to be supplementary.
+
+    Deliberately a short block rather than the report's backbone: work
+    routinely happens without a task record, and a period with no tasks is not
+    a period with no work. The wording exists so the analysis stage cannot read
+    an empty task list as an empty month.
+    """
+
+    tasks = task_service.list_tasks(db, user_id=user_id)
+    completed = [task for task in tasks if period.contains(task.completed_at)]
+    open_tasks = [task for task in tasks if task.completed_at is None]
+
+    if not tasks:
+        return (
+            "No tasks are recorded for this user. Tasks are supplementary "
+            "evidence only; judge the period by its correspondence."
+        )
+
+    lines = [
+        "Tasks are supplementary evidence, not the definition of work done.",
+        f"{len(completed)} task(s) were completed in this period:",
+    ]
+    lines += [f"- {task.title}" for task in completed[:20]] or ["- (none)"]
+    lines.append(f"{len(open_tasks)} task(s) are open:")
+    lines += [f"- {task.title}" for task in open_tasks[:20]] or ["- (none)"]
+
+    return "\n".join(lines)
 
 
 @router.get(
@@ -398,3 +499,207 @@ def report_document(
             )
         },
     )
+
+
+def _activity_response(
+    outcome: activity_service.Outcome, *, period: Period, now: datetime
+) -> ActivityReportResponse:
+    """One response shape, whether the report was stored or built just now.
+
+    The stored payload holds the document and its counts; everything about
+    *this* request — which window was asked for, and where the answer came
+    from — is added here. A reply from storage and a reply from a fresh
+    generation therefore differ in their provenance fields and in nothing else.
+    """
+
+    row = outcome.row
+
+    return ActivityReportResponse(
+        source=ActivitySource(outcome.source.value),
+        report_version=row.report_version,
+        is_provisional=row.is_provisional,
+        generated_at=row.generated_at or now,
+        checked_at=row.checked_at,
+        data_through=row.data_through,
+        period=_period_response(period, now=now),
+        period_label=period.label,
+        is_partial=period.is_partial,
+        **row.content,
+    )
+
+
+def _pending_response(
+    error: ReportBeingGenerated, *, period: Period, now: datetime
+) -> JSONResponse:
+    """`202 Accepted`: somebody else is building this exact report.
+
+    Not an error. Two people opening the same week at the same moment is
+    ordinary, and the answer to the second is "it is being made", not a second
+    pipeline run. The claim's age is included so a client can say how long it
+    has been going rather than showing an endless spinner.
+    """
+
+    body = ActivityReportPendingResponse(
+        period=_period_response(period, now=now),
+        period_label=period.label,
+        started_at=error.row.started_at,
+        elapsed_seconds=round((now - error.row.started_at).total_seconds(), 1),
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=jsonable_encoder(body),
+    )
+
+
+def _obtain_activity_report(
+    user,
+    db: Session,
+    *,
+    start: date | None,
+    end: date | None,
+    refresh: bool,
+):
+    """The shared body of the two activity endpoints.
+
+    `GET` reuses what is stored; `POST` rebuilds. Everything else about them —
+    the window, the mailbox, the task context, the response — is the same, and
+    duplicating it would be two places to change the day the shape does.
+    """
+
+    now = datetime.now(UTC)
+    window = _resolve_activity_period(start, end, now=now)
+    requested = time.monotonic()
+
+    logger.info(
+        "activity_report_requested user_id=%s period=%s partial=%s refresh=%s",
+        user.id,
+        window.key,
+        window.is_partial,
+        refresh,
+    )
+
+    provider, mailbox = _mailbox_for(db, user_id=user.id)
+
+    def build(correspondence) -> dict:
+        return activity_service.generate_content(
+            correspondence,
+            owner_name=user.name,
+            context=_task_context(db, user_id=user.id, period=window),
+            use_model=llm_configured(),
+            budget_seconds=settings.REPORT_ANALYSIS_BUDGET_SECONDS,
+            now=now,
+        )
+
+    try:
+        outcome = activity_service.obtain(
+            db,
+            user_id=user.id,
+            owner_name=user.name,
+            period=window,
+            provider=provider,
+            mailbox=mailbox,
+            policy=Policy.from_settings(settings),
+            now=now,
+            build=build,
+            refresh=refresh,
+        )
+    except ReportBeingGenerated as pending:
+        return _pending_response(pending, period=window, now=now)
+
+    logger.info(
+        "activity_report_answered user_id=%s period=%s source=%s elapsed=%.2fs",
+        user.id,
+        window.key,
+        outcome.source.value,
+        time.monotonic() - requested,
+    )
+
+    return _activity_response(outcome, period=window, now=now)
+
+
+_ACTIVITY_RESPONSES: dict[int | str, dict] = {
+    **_BAD_PERIOD,
+    202: {
+        "model": ActivityReportPendingResponse,
+        "description": "This report is already being generated",
+    },
+    409: {
+        "model": ErrorResponse,
+        "description": "No mailbox is connected for this user",
+    },
+}
+
+
+@router.get(
+    "/activity",
+    response_model=ActivityReportResponse,
+    responses=_ACTIVITY_RESPONSES,
+    summary="The detailed activity report for a period, stored after the first",
+)
+def activity_report(
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+    start: date | None = Query(
+        default=None,
+        description=(
+            "First day of the period, inclusive. Omit with `end` to report on "
+            "the current month so far."
+        ),
+    ),
+    end: date | None = Query(
+        default=None,
+        description="Last day of the period, inclusive. Defaults to today.",
+    ),
+):
+    """The detailed activity report for one mailbox and one period.
+
+    Any window: a week, a whole month, or a partial one. `start` and `end` are
+    dates rather than a period key because "September so far" is not a calendar
+    period and cannot be named by one — see `PeriodKind.RANGE`.
+
+    **A report is generated once.** A window that has closed cannot change, so
+    the first request builds and stores it and every request after that reads
+    the stored document — no mailbox, no model, no minutes. A window still
+    running is served from storage while it is fresh; after that the mailbox is
+    re-read and, if nothing has arrived, the stored report is served anyway.
+    `source` in the response says which of those happened.
+
+    Answers `202` with `state: "generating"` when another request is already
+    building this exact report, rather than starting a second one.
+
+    A period longer than a week is analysed week by week and then read across,
+    so a month-to-date request returns weekly sections plus a synthesis rather
+    than one flat summary. The endpoint does not fail when the model is
+    unavailable: the report falls back to a structural analysis of the same
+    threads and says so in its header.
+    """
+
+    return _obtain_activity_report(user, db, start=start, end=end, refresh=False)
+
+
+@router.post(
+    "/activity",
+    response_model=ActivityReportResponse,
+    responses=_ACTIVITY_RESPONSES,
+    summary="Rebuild the activity report for a period, ignoring what is stored",
+)
+def regenerate_activity_report(
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+    start: date | None = Query(default=None),
+    end: date | None = Query(default=None),
+):
+    """Rebuild this window's report and replace what is stored.
+
+    The only way a report is rebuilt on purpose, and therefore the only thing
+    the Regenerate button calls. Opening the tab, switching back to a period,
+    or reloading the page all use `GET`, which reuses storage — a rebuild costs
+    a mailbox read and a model call per conversation, and it should happen
+    because somebody asked for it.
+
+    Still one rebuild at a time: a request arriving while another generation is
+    running gets `202` rather than a second pipeline.
+    """
+
+    return _obtain_activity_report(user, db, start=start, end=end, refresh=True)

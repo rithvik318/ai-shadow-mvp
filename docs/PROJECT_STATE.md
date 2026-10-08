@@ -6,9 +6,90 @@ exists, in detail, is [`FEATURES.md`](FEATURES.md); how work gets done here is
 [`../CLAUDE.md`](../CLAUDE.md).
 
 **Checkpoint:** built on `0ff57a3` (`main`), plus the tasks/mailbox milestone,
-the OneDrive → Knowledge Base milestone and the reports/digests pass, all
-uncommitted in the tree. The frontend installs, lints, typechecks, tests and
-builds with its real dependencies. **Updated:** 2026-09-02.
+the OneDrive → Knowledge Base milestone, the reports/digests pass, the
+tasks/follow-ups/reports separation, the external-integration pass and the sync
+reliability pass, all uncommitted in the tree. The frontend installs, lints,
+typechecks, tests and builds with its real dependencies. **Updated:** 2026-09-15.
+
+The reporting pass after that is architectural rather than a repair. The
+endpoint was still a live recomputation: nothing was stored, so every reader of
+7–13 September paid for the whole pipeline again, and that period did not
+return inside 200 seconds. Activity reports are now persisted in their own
+table, `activity_report`, keyed on `(user_id, period_start, period_end,
+report_version)` — migration 0016. A closed window is answered from the
+database in milliseconds; a running one is served while fresh and otherwise
+revalidated against a fingerprint of its correspondence, which costs a mailbox
+read and no model calls when nothing has arrived; `POST /reports/activity` is
+the only thing that rebuilds one, and the Regenerate button is the only caller.
+Two simultaneous requests for the same window produce one generation and a
+`202` carrying the claim's age. Measured against real PostgreSQL over HTTP with
+a 30s/call model: first generation 90s, every request after it 4–9ms.
+
+The pass after that one is about cost rather than correctness: the repaired
+endpoint worked and took minutes. One monthly report made 18 sequential model
+calls — every conversation analysed once for its week and again for the month —
+with no ceiling on the total and the OpenAI SDK's own defaults underneath
+(600-second read timeout, two retries), and the Reports page could start more
+than one of them because its effect was keyed on the period object rather than
+the period. The thread analysis now runs once and is reused by each week, all
+the calls behind one report share a 90-second budget, every client carries a
+timeout and one retry, and the page issues exactly one analysis per selected
+period. Nothing configured the root logger, so the only trace any of this left
+was a bare `report_thread_batch_failed`; logging is configured from `LOG_LEVEL`
+and the pipeline now reports its period, counts, per-batch outcome, exception
+and elapsed time, with no correspondence in any line. Measured on the August
+corpus against a stub provider answering in 5s: 90.5s and 18 calls before,
+55.5s and 11 after; with a 30s provider the request ends at the budget instead
+of running for nine minutes.
+
+The most recent pass is a repair, found in the browser rather than in the suite.
+With a mailbox genuinely connected, `GET /reports/activity` answered HTTP 500:
+the route asked `settings.LLM_API_KEY`, which does not exist. Two things kept it
+invisible. The route's own tests both returned 409 or 400 several lines earlier,
+so 1,608 passing tests never executed the call; and the Reports screen fell back
+to the stored email digest whenever the detailed report was absent for *any*
+reason, so the failure rendered as a working-looking report with an error line
+above it. Fixed at the root — `llm_client.llm_configured()` reads the key of the
+provider `LLM_PROVIDER` names — with the route now exercised end to end against a
+stub mailbox, and with the screen's fallback keyed on *why* the request failed.
+The same pass found that `correspondence.from_provider` read a
+`list_sent_messages` method no provider has, so every live report described the
+inbox and none of the owner's replies; both directions now come from
+`list_messages(folder=...)`. Separately, a Digital Twin renamed on its Profile
+tab changed nothing visible, because the workspace displays `users.name` and
+`PUT /profile` wrote only `digital_twin_profile.name`; a supplied name or role is
+now written to both rows in one transaction. Verified over HTTP against a real
+PostgreSQL 16 instance with the app served by uvicorn — 200 for weekly, monthly
+and month-to-date windows, 198 messages analysed across both directions, and a
+profile rename visible in `GET /users` immediately afterwards.
+
+The sync reliability pass is the response to the first real OneDrive
+synchronisation, which discovered all 847 files and ended `partial` after ~25
+hours with 420 failures and the delta token withheld. Three compounding defects
+produced that and all three are fixed: pre-authorised download URLs were minted
+during enumeration and expire in about an hour, so every file reached after the
+first hour answered 403; every download failure was hard-coded `transient`, so a
+403 withheld the token and the next run would have repeated the whole thing; and
+nothing was rejected before being downloaded, so 292 unsupported files were
+fetched in full to be refused on their extension. Downloads now run in bounded
+concurrent batches with ingestion still serial on one session, retries stop on a
+total time budget, `.xlsx` and `.html` are parsed, and the legacy binaries are
+refused by name with the conversion that would fix them. **No second live sync
+has been run** — see `KNOWN_ISSUES.md`.
+
+The external-integration pass completed the two connections that had been
+structural rather than live. **OneDrive/Knowledge Base:** a source may now name
+a person (`"user": "someone@example.com"`) instead of a drive id, and
+`app/services/graph/drive_url.py` reads a OneDrive web address into the folder
+path — stripping the `Documents` library prefix, which *is* the drive root and
+whose presence 404s a folder that plainly exists — while deliberately refusing
+to guess a user principal name out of a personal site name. **Calendar:**
+`app/services/graph/calendar_service.py` reads `/users/{mailbox}/calendarView`
+and `app/services/features/calendar/import_service.py` records what it returns,
+idempotently on the `(user_id, provider_event_id)` constraint the model has
+carried since it was written — so no migration was needed. `calendar_connected`
+and the activity report's Calendar section are now answered from the rows
+rather than hard-coded to unavailable.
 
 The reports pass added stored report history (`generated_report`, migration
 `0012`), the weekly and monthly email digests, a schedule for them reusing
@@ -24,9 +105,30 @@ in progress.
 
 Feature-complete end to end, backend and frontend. Retrieval, RAG chat, the
 multi-user Digital Twin, ingestion, OneDrive synchronization, a React workspace
-and the **Email Agent** are all built. Two things remain unverified against the
-real world, and both are external rather than structural: no OneDrive folder has
-been synchronised from a live tenant, and no mailbox has been connected.
+and the **Email Agent** are all built.
+
+**The live tenant is reachable and the source resolves correctly.** Graph
+authentication succeeds, the configured `drive_id`/`item_id` resolve to Sudha
+Gummuluru's OneDrive → *Knowledge Base*, enumeration works, and KB retrieval
+answers from synced documents. Two things are outstanding: `Calendars.Read` has
+not been admin-consented (Graph returns `403 ErrorAccessDenied`), and the first
+run of the corrected sync aborted on a 6.8 GB Teams recording that overflowed
+`documents.file_size_bytes` — fixed by migration 0014, which widens it to
+`BIGINT`. **A full sync has not completed since that migration.**
+
+**OneDrive synchronisation had run against the live tenant once before that.** It found
+all 847 files and ended `partial` after ~25 hours — 94 indexed, 41 unchanged,
+292 unsupported, 420 failed, token withheld. That run is what the sync
+reliability pass fixes, and it is the only live Graph evidence this repository
+has. **The corrected code has not been run against the tenant**, so the expected
+behaviour below is from the tests, not from a second sync.
+
+The mailbox and the calendar import remain entirely unverified against the real
+world: both are unit-tested against a mock transport and neither has been run
+with live credentials, which live only in `backend/.env` and are not read by
+this work. Until somebody runs `python -m scripts.verify_graph_access` and
+`GET /calendar/status` against the real tenant, "works" there means "the request
+shapes match Microsoft's documented contracts", not "a real mailbox answered".
 
 ## Completed
 
@@ -38,30 +140,35 @@ been synchronised from a live tenant, and no mailbox has been connected.
 - **Knowledge base** — a deterministic manifest selects the corpus and records why for every file; a second script ingests exactly that list through the upload endpoint. The manifest milestone is committed.
 - **Multi-file upload** — `POST /documents/batch-upload`, per-file results, failures isolated to the file that caused them. Both upload paths share one ingestion service.
 - **Idempotent ingestion and re-indexing** — identity is a content hash plus an optional source identifier; unchanged files are skipped, changed ones re-indexed in place with their old chunks removed.
-- **OneDrive synchronization** — Microsoft Graph client-credentials auth, configurable source folders, delta-based incremental runs, deletion handling, per-file results, and an optional periodic run. Calls the existing ingestion service.
+- **OneDrive synchronization** — Microsoft Graph client-credentials auth, configurable source folders, delta-based incremental runs, deletion handling, per-file results, and an optional periodic run. Calls the existing ingestion service. Failures are classified transient or permanent by HTTP status, and only transient ones withhold the delta token; expired pre-authorised download URLs are re-minted once; unsupported formats are decided from the folder listing and never downloaded; downloads run in bounded concurrent batches while ingestion stays serial on one session.
 - **Frontend** — `frontend/`, React + Tailwind + Vite. Chat workspace with in-composer multi-file upload, per-file ingestion outcomes, knowledge-base panel, Digital Twin panel, Email Agent workspace, and citation cards kept separate from the answer.
+- **Calendar import** — `GET /calendar/status` probes Graph and never raises; `POST /calendar/import` reads an explicit window through `/calendarView` (so a recurring meeting arrives as its occurrences) and records it. Idempotent on Graph's event id, and it never overwrites an attendance answer a person gave. Nothing imports on a schedule and nothing acts on a meeting.
 - **Email Agent** — drafting, ten revision operations, user-owned templates with placeholder filling, drafts with attachments, triage, follow-up recommendations, and a provider boundary with an Outlook implementation over the existing Graph client. Migration `0006`. Human approval is required before any send, and editing a draft withdraws it.
 
 ## Test status
 
-**Backend: 1055 passed, 4 skipped**, actually executed with `pytest -q` from
-`backend/` — dependencies now install here, so these numbers are measured
-rather than projected. `ruff check` and `ruff format --check` are clean across
-`app tests scripts alembic`, and `python -m scripts.static_check` resolves every
-first-party import and checks every first-party call site against its signature.
+**Backend: 1503 passed** (8 of them skipped without PostgreSQL), actually executed with `pytest -q` from
+`backend/` — dependencies install here, so these numbers are measured rather
+than projected. `ruff check` and `ruff format --check` are clean across
+`app tests alembic`, and `python -m scripts.static_check` resolves every
+first-party import and checks every first-party call site against its signature
+(257 modules, migrations OK).
+
+Every test runs offline against SQLite and a mock Graph transport. That is what
+keeps CI possible, and it is also the boundary of what these numbers claim: a
+green suite says the code does what it was written to do, not that Microsoft
+answered.
 
 Note this figure describes **this tree**. A working copy without the
 tasks/mailbox milestone applied sits at a different total, so a mismatch is a
 sign the archives were not extracted rather than a sign of a regression.
 
-**Frontend: 134 passing**, actually executed — `node --import tsx --test` over
+**Frontend: 204 passing**, actually executed — `node --import tsx --test` over
 `src/tests/`, covering the API client (endpoint paths, `X-User-ID`
 propagation, error translation) and the upload result mapping. They need no
-browser and no bundler. The React components have **never been built or
-typechecked against real `@types/react`**: the environment they were written in
-had no package registry. `npm install && npm run lint && npm run typecheck && npm run test && npm run
-build` have now all been run and are green. `npm run format:check` still reports
-eight pre-existing files from the Email Agent milestone; they were left alone
+browser and no bundler. `npm run lint`, `tsc --noEmit`, `npm run test` and
+`npm run build` have all been run and are green. `npm run format:check` still
+reports pre-existing files from the Email Agent milestone; they were left alone
 rather than reformatted inside an unrelated change.
 
 ## Assumptions made where the brief was ambiguous
@@ -241,9 +348,10 @@ Detail and priority live in [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
 
 ## Explicitly deferred
 
-Autonomous agents, CRM, calendar, LangGraph and n8n — none of them, in any
-partial form. Email is now built, but everything autonomous about it is still
-deferred: nothing schedules a send, nothing contacts anybody without a person
+Autonomous agents, CRM, LangGraph and n8n — none of them, in any partial form.
+Email and the calendar are now built, but everything autonomous about both is
+still deferred: no scheduling agent, no automatic import, nothing that acts on
+a meeting; nothing schedules a send, nothing contacts anybody without a person
 approving it, and no model can reach a mailbox provider. Also deferred, from the reference repository's design: the AI
 Orchestrator, the tool architecture and multi-agent workflows. Nothing here is
 built until something concretely requires it.

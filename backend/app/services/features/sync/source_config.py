@@ -36,6 +36,14 @@ class OneDriveSource:
     which is a different act with the same shape and is how these integrations
     end up pointed at the wrong folder.
 
+    `user` is the third way of naming a drive, and the one a personal
+    OneDrive needs. A folder in somebody's OneDrive for Business lives on a
+    drive whose id nobody has written down, but every administrator knows whose
+    account it is — so the address is configured and the id is asked for at
+    resolution time through `/users/{upn}/drive`. That keeps a person's drive
+    id out of configuration files, where it would be an opaque string nobody
+    can check and one that changes if the account is recreated.
+
     `enabled` is how a source is taken out of the rotation without deleting
     its configuration. A disabled source keeps its key, and therefore its
     stored delta token, so re-enabling it resumes rather than re-indexing.
@@ -44,11 +52,18 @@ class OneDriveSource:
     key: str
     label: str
     drive_id: str | None = None
+    user: str | None = None
     path: str | None = None
     item_id: str | None = None
     share_url: str | None = None
     uri: str | None = None
     enabled: bool = True
+
+    @property
+    def addressed_by_user_drive(self) -> bool:
+        """True when the drive has to be looked up from a person's address."""
+
+        return bool(self.user) and not self.drive_id
 
     @property
     def addressed_by_share_link(self) -> bool:
@@ -116,24 +131,35 @@ def load_sources(raw: str | None = None) -> list[OneDriveSource]:
         path = entry.get("path")
         item_id = entry.get("item_id")
         share_url = entry.get("share_url")
+        user = entry.get("user")
 
-        if not path and not item_id and not share_url:
+        # A source naming a `user` and nothing else means that person's whole
+        # library, which is a legitimate thing to synchronise and resolves to
+        # the drive root.
+        if not path and not item_id and not share_url and not user:
             raise SyncNotConfiguredError(
-                f"ONEDRIVE_SOURCES entry {key!r} needs `path`, `item_id` or "
-                "`share_url`."
+                f"ONEDRIVE_SOURCES entry {key!r} needs `path`, `item_id`, "
+                "`share_url` or `user`."
             )
 
-        drive_id = entry.get("drive_id") or settings.ONEDRIVE_DRIVE_ID
+        # An explicit `drive_id` on the entry wins, then the person named on
+        # it, and only then the deployment-wide default. Falling back to
+        # ONEDRIVE_DRIVE_ID for a source that names a user would silently
+        # synchronise the wrong drive — the default is a *different* drive, and
+        # the failure would look like an empty folder rather than a mistake.
+        drive_id = entry.get("drive_id") or (
+            None if user else settings.ONEDRIVE_DRIVE_ID
+        )
 
         # A share link names its own drive once Graph resolves it, so requiring
         # one up front would mean inventing a drive id to satisfy a check —
         # and an invented drive id addressed a real drive that was the wrong
         # one. Path and id addressing still need it: they are relative to a
         # drive and mean nothing without one.
-        if not drive_id and not share_url:
+        if not drive_id and not share_url and not user:
             raise SyncNotConfiguredError(
-                f"ONEDRIVE_SOURCES entry {key!r} has no `drive_id`, and "
-                "ONEDRIVE_DRIVE_ID is not set."
+                f"ONEDRIVE_SOURCES entry {key!r} has no `drive_id` or `user`, "
+                "and ONEDRIVE_DRIVE_ID is not set."
             )
 
         enabled = entry.get("enabled", True)
@@ -151,6 +177,7 @@ def load_sources(raw: str | None = None) -> list[OneDriveSource]:
                 key=key,
                 label=str(entry.get("label") or path or key),
                 drive_id=str(drive_id) if drive_id else None,
+                user=str(user).strip() if user else None,
                 path=str(path) if path else None,
                 item_id=str(item_id) if item_id else None,
                 share_url=str(share_url) if share_url else None,

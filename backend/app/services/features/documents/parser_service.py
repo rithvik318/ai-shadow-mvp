@@ -5,13 +5,16 @@ That keeps the format-specific logic — which is where the awkward edge cases
 live — independently testable.
 """
 
+import codecs
 import io
 import logging
 import re
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 
 import docx
+import openpyxl
 import pypdf
 from docx.oxml.ns import qn
 from docx.oxml.table import CT_Tbl
@@ -21,10 +24,17 @@ from docx.text.paragraph import Paragraph
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
-from app.core.constants import SUPPORTED_CONTENT_TYPES, SUPPORTED_EXTENSIONS
+from app.core.constants import (
+    KNOWN_UNSUPPORTED_EXTENSIONS,
+    NO_TEXT_LAYER_REASON,
+    SUPPORTED_CONTENT_TYPES,
+    SUPPORTED_EXTENSIONS,
+    SUPPORTED_FORMAT_SUMMARY,
+)
 from app.core.exceptions import (
     DocumentParseError,
     EmptyDocumentError,
+    NoTextLayerError,
     UnsupportedDocumentTypeError,
 )
 
@@ -126,13 +136,96 @@ def resolve_format(filename: str, content_type: str | None) -> str:
     if extension in SUPPORTED_EXTENSIONS:
         return SUPPORTED_EXTENSIONS[extension]
 
+    # A format we recognise and deliberately do not parse gets its own answer.
+    # "Unsupported document type: .doc" tells somebody nothing they can act on;
+    # "save it as .docx" is the entire remedy, and across a real corpus this is
+    # the difference between a list of rejects and a list of tasks.
+    if extension in KNOWN_UNSUPPORTED_EXTENSIONS:
+        raise UnsupportedDocumentTypeError(
+            f"{KNOWN_UNSUPPORTED_EXTENSIONS[extension]}, and it will be indexed "
+            "on the next synchronisation."
+        )
+
     raise UnsupportedDocumentTypeError(
         f"Unsupported document type: {content_type or extension or 'unknown'}. "
-        f"Supported formats are PDF, DOCX, PPTX, TXT and Markdown."
+        f"Supported formats are {SUPPORTED_FORMAT_SUMMARY}."
     )
 
 
+#: Byte-order marks, longest first. Order is load-bearing: UTF-32LE's BOM
+#: *begins with* UTF-16LE's, so testing the short one first would decode a
+#: UTF-32 file as UTF-16 and never notice.
+_BYTE_ORDER_MARKS: tuple[tuple[bytes, str], ...] = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
+
+def _wide_encoding(data: bytes) -> str | None:
+    """Name the UTF-16 variant of a file that declares no byte-order mark.
+
+    Latin text in UTF-16 is half NUL bytes, and which half says the endianness.
+    The test is deliberately blunt because the alternative is worse: every
+    single-byte codec in the fallback chain accepts those NULs happily, so an
+    undetected UTF-16 file is not a decode failure — it is a silent success
+    that yields a string of alternating characters and NULs.
+    """
+
+    sample = data[:4096]
+
+    if len(sample) < 4:
+        return None
+
+    even = sample[0::2].count(0)
+    odd = sample[1::2].count(0)
+    half = len(sample) // 2
+
+    # A third of one side NUL and almost none of the other. Real single-byte
+    # text has no NULs at all, so anything near this ratio is a wide encoding.
+    if odd > half * 0.3 and even < half * 0.05:
+        return "utf-16-le"
+
+    if even > half * 0.3 and odd < half * 0.05:
+        return "utf-16-be"
+
+    return None
+
+
 def _decode(data: bytes) -> str:
+    """Decode a text file, honouring its byte-order mark before guessing.
+
+    The BOM check exists because guessing cannot fail safely. `cp1252` and
+    `latin-1` map almost every byte, so a UTF-16 file decodes *without raising*
+    into mojibake in which every second character is U+0000 — and PostgreSQL
+    cannot store U+0000 at all. A MindManager HTML export in the SunRadia
+    corpus did exactly this: `\\xff\\xfe` was read as `ÿþ`, the markup arrived
+    with 19,741 NULs in it, and psycopg2 ended the ingest with
+    `ValueError: A string literal cannot contain NUL (0x00) characters.`
+    """
+
+    for mark, encoding in _BYTE_ORDER_MARKS:
+        if data.startswith(mark):
+            try:
+                # `utf-16`/`utf-32` without a suffix consume the BOM and take
+                # the endianness from it, which is exactly what is wanted.
+                return data.decode(encoding)
+            except UnicodeDecodeError as exc:
+                raise DocumentParseError(
+                    f"File declares a {encoding} byte-order mark but does not "
+                    "decode as it."
+                ) from exc
+
+    wide = _wide_encoding(data)
+
+    if wide is not None:
+        try:
+            return data.decode(wide)
+        except UnicodeDecodeError:
+            pass
+
     for encoding in _TEXT_ENCODINGS:
         try:
             return data.decode(encoding)
@@ -710,13 +803,222 @@ def _parse_text(data: bytes) -> ParsedDocument:
     return ParsedDocument(sections=sections, page_count=None)
 
 
+class _HtmlReader(HTMLParser):
+    """Text and headings out of HTML, using the standard library only.
+
+    A parser rather than a regular expression, because tag soup is exactly
+    where a regular expression produces plausible-looking wrong answers. Not
+    BeautifulSoup, because the whole job is "collect text, notice headings",
+    and this repository has already once regretted taking a dependency to avoid
+    thirty lines.
+
+    Two things it deliberately drops. `script` and `style` hold source code, not
+    prose, and indexing a page's JavaScript makes every page look similar to
+    every other. `<br>` and block boundaries become whitespace, so words on
+    either side of a tag do not run together — `a<br>b` is two words.
+    """
+
+    _SKIP = frozenset({"script", "style", "head", "title", "noscript"})
+    _HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+    _BLOCKS = frozenset(
+        {"p", "div", "li", "tr", "br", "section", "article", "table", "blockquote"}
+    )
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+
+        self.sections: list[ParsedSection] = []
+        self._title: str | None = None
+        self._buffer: list[str] = []
+        self._heading: list[str] | None = None
+        self._skipping = 0
+
+    def _flush(self) -> None:
+        body = " ".join(" ".join(self._buffer).split())
+        self._buffer.clear()
+
+        if body:
+            self.sections.append(ParsedSection(text=body, section_title=self._title))
+
+    def handle_starttag(self, tag: str, attrs: object) -> None:
+        if tag in self._SKIP:
+            self._skipping += 1
+            return
+
+        if tag in self._HEADINGS:
+            # A heading opens a new section, so whatever came before it belongs
+            # to the previous one.
+            self._flush()
+            self._heading = []
+            return
+
+        if tag in self._BLOCKS:
+            self._buffer.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SKIP:
+            self._skipping = max(self._skipping - 1, 0)
+            return
+
+        if tag in self._HEADINGS and self._heading is not None:
+            title = " ".join(" ".join(self._heading).split())
+            self._heading = None
+            self._title = title or self._title
+
+    def handle_data(self, data: str) -> None:
+        if self._skipping:
+            return
+
+        if self._heading is not None:
+            self._heading.append(data)
+            return
+
+        self._buffer.append(data)
+
+    def close(self) -> None:
+        super().close()
+        self._flush()
+
+
+def _parse_html(data: bytes) -> ParsedDocument:
+    """Extract prose from an HTML file, split on its headings."""
+
+    reader = _HtmlReader()
+
+    try:
+        reader.feed(_decode(data))
+        reader.close()
+    except DocumentParseError:
+        raise
+    except Exception as exc:
+        raise DocumentParseError(f"HTML could not be read: {exc}") from exc
+
+    return ParsedDocument(sections=reader.sections, page_count=None)
+
+
+#: A spreadsheet is not a document, and a large one is not a document in a way
+#: that matters: a sheet of 50,000 rows embedded whole is a retrieval result
+#: that matches everything and means nothing. Rows beyond this are dropped and
+#: the section says so, which is honest and keeps the cost bounded.
+MAX_SHEET_ROWS = 2000
+
+
+def _parse_xlsx(data: bytes) -> ParsedDocument:
+    """Read each worksheet as a table, one section per sheet.
+
+    `read_only` because the alternative builds the whole workbook in memory,
+    and `data_only` because a cell holding `=SUM(B2:B9)` should reach the index
+    as the number a reader would see, not as its formula.
+    """
+
+    try:
+        workbook = openpyxl.load_workbook(
+            io.BytesIO(data), read_only=True, data_only=True
+        )
+    except Exception as exc:
+        raise DocumentParseError(f"Spreadsheet could not be read: {exc}") from exc
+
+    sections: list[ParsedSection] = []
+
+    try:
+        for sheet in workbook.worksheets:
+            rows: list[list[str]] = []
+            truncated = False
+
+            for position, row in enumerate(sheet.iter_rows(values_only=True)):
+                if position >= MAX_SHEET_ROWS:
+                    truncated = True
+                    break
+
+                cells = [
+                    "" if value is None else str(value).strip() for value in row or ()
+                ]
+
+                if any(cells):
+                    rows.append(cells)
+
+            body = _serialise_rows(rows)
+
+            if truncated:
+                body += f"\n[Sheet truncated at {MAX_SHEET_ROWS} rows.]"
+
+            if body.strip():
+                sections.append(ParsedSection(text=body, section_title=sheet.title))
+    except DocumentParseError:
+        raise
+    except Exception as exc:
+        raise DocumentParseError(f"Spreadsheet could not be read: {exc}") from exc
+    finally:
+        workbook.close()
+
+    return ParsedDocument(sections=sections, page_count=None)
+
+
 _PARSERS = {
     "pdf": _parse_pdf,
     "docx": _parse_docx,
     "pptx": _parse_pptx,
+    "xlsx": _parse_xlsx,
+    "html": _parse_html,
     "md": _parse_markdown,
     "txt": _parse_text,
 }
+
+
+#: Characters no extracted text may carry into the database.
+#:
+#: U+0000 is the one that matters and the reason this exists: PostgreSQL's
+#: `text` cannot hold it at all, and psycopg2 refuses the parameter with
+#: `ValueError: A string literal cannot contain NUL (0x00) characters` — an
+#: error from outside the domain hierarchy, which therefore surfaced as
+#: "Ingestion failed unexpectedly (ValueError)" rather than as anything a
+#: reader could act on. SQLite stores NULs without complaint, so the whole test
+#: suite passed while three real files in the SunRadia corpus could not be
+#: ingested: two UTF-16 HTML exports, and `Summary View.pdf`, an ordinary
+#: six-page PDF whose font's ToUnicode CMap maps a handful of glyphs to U+0000.
+#:
+#: The other C0 and C1 controls go with it. They are never meaningful prose,
+#: they render as replacement boxes in a citation, and a corpus that silently
+#: differs from what PostgreSQL will accept is the whole class of bug being
+#: closed here. Tab, newline and carriage return are kept: they carry the
+#: layout that chunking and citation depend on.
+_CONTROL_CHARACTERS = {
+    codepoint: None
+    for codepoint in [*range(0x00, 0x20), 0x7F, *range(0x80, 0xA0)]
+    if codepoint not in (0x09, 0x0A, 0x0D)
+}
+
+
+def _clean(text: str) -> str:
+    """Strip characters the database cannot store from extracted text."""
+
+    return text.translate(_CONTROL_CHARACTERS)
+
+
+def _cleaned(parsed: ParsedDocument) -> ParsedDocument:
+    """Return `parsed` with every section's text and title made storable.
+
+    Applied once, here, rather than in each `_parse_*`: a per-format fix is one
+    a new format silently opts out of, and the guarantee wanted is about every
+    document that reaches the database, not about the formats someone
+    remembered.
+    """
+
+    sections = [
+        ParsedSection(
+            text=cleaned,
+            page_number=section.page_number,
+            section_title=(
+                _clean(section.section_title).strip() or None
+                if section.section_title
+                else None
+            ),
+        )
+        for section in parsed.sections
+        if (cleaned := _clean(section.text).strip())
+    ]
+
+    return ParsedDocument(sections=sections, page_count=parsed.page_count)
 
 
 def parse_document(
@@ -728,18 +1030,19 @@ def parse_document(
     `DocumentParseError` when a file of a known format cannot be read, and
     `EmptyDocumentError` when it yields no text — the last of which covers
     scanned PDFs with no text layer.
+
+    The emptiness check runs **after** sanitising, deliberately: a file whose
+    only content is control characters has no text layer, and saying so is a
+    truthful answer where writing a row of stripped-to-nothing sections is not.
     """
 
     if not data:
         raise EmptyDocumentError("Uploaded file is empty.")
 
     document_format = resolve_format(filename, content_type)
-    parsed = _PARSERS[document_format](data)
+    parsed = _cleaned(_PARSERS[document_format](data))
 
     if not parsed.sections:
-        raise EmptyDocumentError(
-            "No text could be extracted from the document. Scanned documents "
-            "without a text layer are not supported."
-        )
+        raise NoTextLayerError(NO_TEXT_LAYER_REASON)
 
     return parsed

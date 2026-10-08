@@ -76,6 +76,7 @@ function source(overrides: Partial<SyncSourceState> = {}): SyncSourceState {
     last_unchanged: 6,
     last_deleted: 1,
     last_unsupported: 1,
+    last_ocr_required: 2,
     last_failed: 0,
     error_message: null,
     last_attempted_at: "2026-08-30T09:00:00Z",

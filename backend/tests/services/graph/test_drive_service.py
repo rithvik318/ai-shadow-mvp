@@ -5,10 +5,13 @@ These assertions are about the translation from Graph's payload shape into
 right and has no way to notice when it is not.
 """
 
+import httpx
 import pytest
 
+from app.core.exceptions import GraphError
 from app.services.graph.client import GraphClient
 from app.services.graph.drive_service import (
+    fresh_download_url,
     iter_delta,
     iter_files,
     resolve_folder,
@@ -412,3 +415,153 @@ def test_a_quote_in_a_search_term_cannot_break_the_query() -> None:
     routes = {"/root/search": {"value": []}}
 
     assert search_folder(_client(routes), drive_id=DRIVE_ID, query="Bob's files") == []
+
+
+# --- getting a current download URL ---------------------------------------
+#
+# The regression this section exists for indexed **zero** files out of 859 in a
+# live run. `@microsoft.graph.downloadUrl` is an instance annotation, not a
+# property, and Graph does not reliably return it under `$select` — so asking
+# for the item with `$select=id,@microsoft.graph.downloadUrl` produced an item
+# with no URL, which the caller called a permanent failure, for every file.
+
+
+def _content_transport(*, redirect_to: str | None, item: dict | None = None):
+    """Answer `/content` with a 302, and the item read with a payload."""
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+
+        if "/oauth2/v2.0/token" in url:
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+
+        seen.append(url)
+
+        if url.endswith("/content"):
+            if redirect_to is None:
+                return httpx.Response(404, json={"error": {"code": "itemNotFound"}})
+
+            return httpx.Response(302, headers={"Location": redirect_to})
+
+        return httpx.Response(200, json=item or {"id": "i1", "name": "a.txt"})
+
+    return httpx.MockTransport(handler), seen
+
+
+def test_content_is_asked_before_the_annotation() -> None:
+    """Ordering is the fix. `/content` is defined for every file item."""
+
+    transport, seen = _content_transport(redirect_to="https://files.example/fresh")
+    client = GraphClient(
+        tenant_id="t",
+        client_id="c",
+        client_secret="s",
+        base_url="https://graph.example/v1.0",
+        authority="https://login.example",
+        transport=transport,
+    )
+
+    url = fresh_download_url(client, drive_id=DRIVE_ID, item_id="i1")
+
+    assert url == "https://files.example/fresh"
+    assert len(seen) == 1
+    assert seen[0].endswith("/items/i1/content")
+    # The annotation was never needed, and `$select` was never sent.
+    assert "$select" not in seen[0]
+
+
+def test_the_bearer_token_never_reaches_the_storage_host() -> None:
+    """The only reason `/content` was avoided before.
+
+    Following the redirect with `GraphClient` would carry the Authorization
+    header to the storage host. Reading `Location` and stopping does not.
+    """
+
+    headers: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+
+        if "/oauth2/v2.0/token" in url:
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+
+        headers.append([name.lower() for name in request.headers])
+
+        return httpx.Response(302, headers={"Location": "https://files.example/fresh"})
+
+    client = GraphClient(
+        tenant_id="t",
+        client_id="c",
+        client_secret="s",
+        base_url="https://graph.example/v1.0",
+        authority="https://login.example",
+        transport=handler_transport(handler),
+    )
+
+    fresh_download_url(client, drive_id=DRIVE_ID, item_id="i1")
+
+    # Exactly one request was made — the redirect was read, not followed.
+    assert len(headers) == 1
+    assert "authorization" in headers[0]
+
+
+def test_the_annotation_is_the_fallback_when_content_does_not_redirect() -> None:
+    """A drive that answers the item but not the redirect keeps its files."""
+
+    transport, _ = _content_transport(
+        redirect_to=None,
+        item={"id": "i1", "@microsoft.graph.downloadUrl": "https://files.example/alt"},
+    )
+
+    client = GraphClient(
+        tenant_id="t",
+        client_id="c",
+        client_secret="s",
+        base_url="https://graph.example/v1.0",
+        authority="https://login.example",
+        transport=transport,
+    )
+
+    # `/content` 404s, but the item itself answers and carries the annotation —
+    # so the file is plainly there and plainly downloadable. Losing it to an
+    # ordering choice is exactly the failure this fallback exists to prevent.
+    url = fresh_download_url(client, drive_id=DRIVE_ID, item_id="i1")
+
+    assert url == "https://files.example/alt"
+
+
+def test_an_item_with_no_content_stream_says_what_it_probably_is() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+
+        if "/oauth2/v2.0/token" in url:
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+
+        if url.endswith("/content"):
+            return httpx.Response(200, json={})
+
+        return httpx.Response(200, json={"id": "i1", "name": "Notebook"})
+
+    client = GraphClient(
+        tenant_id="t",
+        client_id="c",
+        client_secret="s",
+        base_url="https://graph.example/v1.0",
+        authority="https://login.example",
+        transport=handler_transport(handler),
+    )
+
+    with pytest.raises(GraphError) as caught:
+        fresh_download_url(client, drive_id=DRIVE_ID, item_id="i1")
+
+    assert "no content stream" in str(caught.value)
+    assert "OneNote" in str(caught.value)
+    assert caught.value.transient is False
+
+
+def handler_transport(handler) -> httpx.MockTransport:
+    """A transport from a bare handler, for tests that inspect the request."""
+
+    return httpx.MockTransport(handler)

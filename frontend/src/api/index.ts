@@ -5,6 +5,8 @@
 
 import { download, request, upload } from "./client";
 import type {
+  ActivityReport,
+  ActivityReportPending,
   ComposeRequest,
   ComposeResponse,
   EmailAssessment,
@@ -34,6 +36,8 @@ import type {
   BatchUploadResponse,
   ChatResponse,
   CalendarEvent,
+  CalendarImport as CalendarImportResult,
+  CalendarStatus,
   CorpusStats,
   DocumentList,
   DocumentStatus,
@@ -149,6 +153,51 @@ export const uploadDocuments = (files: File[], signal?: AbortSignal) => {
     signal,
   });
 };
+
+// --- activity reports (report_routes.py: GET /reports/activity) ----------
+//
+// Separate from `getReport` because it is a different kind of thing: that one
+// reads a stored snapshot by period key, this one generates a report from
+// correspondence on request. `start` and `end` are dates rather than a period
+// key because a partial period — "this month so far" — has no key.
+//
+// Omitting `end` is meaningful: the backend then runs the window up to now,
+// which is what makes a month-to-date report honest about where it stops.
+
+/**
+ * The detailed activity report for a window.
+ *
+ * A `GET` reuses what the backend has stored: a period that has closed is read
+ * from the database in milliseconds and never rebuilt. The reply is either the
+ * report or — when another request is already building this exact one — a
+ * `generating` marker, and `state` tells the two apart.
+ */
+export const getActivityReport = (
+  userId: string,
+  options: { start?: string; end?: string } = {},
+) =>
+  request<ActivityReport | ActivityReportPending>("/reports/activity", {
+    userId,
+    query: { start: options.start, end: options.end },
+  });
+
+/**
+ * Rebuild the report for a window, ignoring what is stored.
+ *
+ * A `POST`, because it makes something: minutes of mailbox reading and model
+ * calls, replacing the stored document. It is what the Regenerate button
+ * sends, and nothing else in the UI may call it — opening a tab is not a
+ * request to rebuild a report.
+ */
+export const regenerateActivityReport = (
+  userId: string,
+  options: { start?: string; end?: string } = {},
+) =>
+  request<ActivityReport | ActivityReportPending>("/reports/activity", {
+    method: "POST",
+    userId,
+    query: { start: options.start, end: options.end },
+  });
 
 // --- digital twin (profile_routes.py, memory_routes.py) ------------------
 
@@ -418,6 +467,28 @@ export const markAttendance = (
 
 export const deleteEvent = (userId: string, id: string) =>
   request<void>(`/events/${id}`, { method: "DELETE", userId });
+
+/**
+ * Whether Graph will actually hand over this person's calendar.
+ *
+ * Answers rather than fails: "the application has no Calendars.Read consent"
+ * is the useful reply, and a screen that has to catch an error to show it will
+ * eventually not.
+ */
+export const getCalendarStatus = (userId: string) =>
+  request<CalendarStatus>("/calendar/status", { userId });
+
+/**
+ * Read one window of the real calendar and record what is there. Idempotent —
+ * running it twice imports nothing the second time, and it never overwrites an
+ * attendance answer somebody gave.
+ */
+export const importCalendar = (userId: string, since: string, until: string) =>
+  request<CalendarImportResult>("/calendar/import", {
+    method: "POST",
+    body: { since, until },
+    userId,
+  });
 
 // --- user deletion (backend/app/api/user_routes.py) ----------------------
 //

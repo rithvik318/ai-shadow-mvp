@@ -15,6 +15,8 @@ happens where a report is *built*, not where one is read back.
 """
 
 from datetime import datetime
+from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -145,3 +147,101 @@ class ReportHistoryResponse(BaseModel):
     items: list[ReportSummaryResponse] = Field(default_factory=list)
     available_periods: list[PeriodResponse] = Field(default_factory=list)
     total: int = 0
+
+
+class ActivitySource(StrEnum):
+    """How this reply was produced. Four states a reader can act on.
+
+    `stored` and `revalidated` both mean the document was not rebuilt — the
+    difference is whether the mailbox was re-read to confirm it — and
+    `generated` means it was built for this request. A report that is being
+    built is not this model at all: see `ActivityReportPendingResponse`.
+    """
+
+    STORED = "stored"
+    REVALIDATED = "revalidated"
+    GENERATED = "generated"
+
+
+class ActivityReportPendingResponse(BaseModel):
+    """Somebody is already building this exact report.
+
+    Returned with `202 Accepted` when a second request arrives for a window a
+    generation is already running for. It carries the claim's age so a client
+    can say how long it has been going rather than showing a spinner with no
+    end in sight.
+    """
+
+    state: Literal["generating"] = "generating"
+    period: PeriodResponse
+    period_label: str
+    started_at: datetime
+    elapsed_seconds: float
+    detail: str = (
+        "This report is being generated. It will be stored when it finishes, "
+        "and every request after that reads it from storage."
+    )
+
+
+class ActivityReportResponse(BaseModel):
+    """A detailed activity report, plus what it was built from.
+
+    The metadata is not decoration. A reader needs to know whether a narrative
+    analysis contributed, how much of the mailbox was substantive, and whether
+    the quality check was satisfied — otherwise a thin report and a quiet month
+    look identical, which is the confusion the previous report created.
+
+    `source`, `generated_at` and `data_through` answer the other question a
+    reader of a stored report has: how old is this, and how old is the evidence
+    under it. They are different instants and both are shown.
+    """
+
+    state: Literal["report"] = "report"
+    source: ActivitySource
+    report_version: str
+    is_provisional: bool = Field(
+        description=(
+            "True when the window was still open when this was generated, so "
+            "the report may change as more mail arrives."
+        )
+    )
+    generated_at: datetime
+    checked_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the evidence behind this report was last confirmed current. "
+            "Later than `generated_at` for a report revalidated against an "
+            "unchanged mailbox."
+        ),
+    )
+    data_through: datetime | None = Field(
+        default=None,
+        description="The instant the correspondence behind this report runs to.",
+    )
+
+    period: PeriodResponse
+    period_label: str
+    is_partial: bool = Field(
+        description="True when the window stops short of the calendar period."
+    )
+
+    title: str
+    markdown: str
+
+    word_count: int
+    sections: list[str]
+    workstream_count: int
+    thread_count: int
+    messages_analysed: int
+    substantive_threads: int
+    routine_threads: int
+
+    narrative: bool = Field(
+        description=(
+            "Whether a language model contributed. False means the report "
+            "describes conversations structurally rather than by content."
+        )
+    )
+    quality_ok: bool
+    quality_notes: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)

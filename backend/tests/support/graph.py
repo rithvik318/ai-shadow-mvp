@@ -16,6 +16,7 @@ Neither reaches the network, and no test needs a credential.
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -183,8 +184,20 @@ class FakeGraphClient:
     fail_downloads: set[str] = field(default_factory=set)
     expire_delta_on: set[int] = field(default_factory=set)
 
+    #: URLs that answer as an expired pre-authorised link — Graph's 403. The
+    #: remedy is a fresh URL, not a retry, so a test registering one here is
+    #: describing the failure a long-running sync actually meets.
+    expired_urls: set[str] = field(default_factory=set)
+    #: URLs refused outright, even when freshly minted: the application is not
+    #: allowed to read the item. Permanent, and must not hold the token back.
+    forbidden_urls: set[str] = field(default_factory=set)
+    #: What `fresh_download_url` mints, keyed by item id. An item with no entry
+    #: has no current URL, which is itself a permanent failure.
+    fresh_urls: dict[str, str] = field(default_factory=dict)
+
     delta_calls: list[str | None] = field(default_factory=list)
     downloaded: list[str] = field(default_factory=list)
+    refreshed: list[str] = field(default_factory=list)
     _delta_index: int = 0
 
     # --- the surface the sync service uses -------------------------------
@@ -227,14 +240,45 @@ class FakeGraphClient:
         payload = self.get(path_or_url, params)
         yield from payload.get("value", [])
 
-    def download(self, url: str) -> bytes:
+    def redirect_location(self, path_or_url: str) -> str | None:
+        """What `/drives/{d}/items/{i}/content` answers with.
+
+        The real client reads the `Location` of a 302 rather than following it,
+        so the bearer token never reaches the storage host. Modelled here
+        because it is now the primary way a fresh URL is obtained, and a double
+        that did not offer it would let the fallback carry every test.
+        """
+
+        item_id = path_or_url.rstrip("/").removesuffix("/content").rsplit("/", 1)[-1]
+        self.refreshed.append(item_id)
+
+        return self.fresh_urls.get(item_id)
+
+    def download(self, url: str, *, refresh: Callable[[], str] | None = None) -> bytes:
+        """Mirror the real client's classification, including the refresh.
+
+        The refresh path is modelled rather than stubbed because it is the fix
+        for the defect this double exists to reproduce: a URL minted at
+        enumeration and spent hours later. A test that could not express "this
+        URL is stale but the file is fine" could not tell the fix from the bug.
+        """
+
         self.downloaded.append(url)
 
+        if url in self.expired_urls and refresh is not None:
+            url = refresh()
+            self.downloaded.append(url)
+
+        if url in self.forbidden_urls or url in self.expired_urls:
+            raise GraphRequestError("Download refused (HTTP 403).", transient=False)
+
         if url in self.fail_downloads:
-            raise GraphRequestError("Download failed (HTTP 500).")
+            raise GraphRequestError("Download failed (HTTP 500).", transient=True)
 
         if url not in self.downloads:
-            raise GraphRequestError("Download failed (HTTP 404).")
+            raise GraphRequestError(
+                "Download failed permanently (HTTP 404).", transient=False
+            )
 
         return self.downloads[url]
 

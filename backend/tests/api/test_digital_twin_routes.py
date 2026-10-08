@@ -184,6 +184,88 @@ def test_a_body_cannot_choose_whose_profile_is_written(
     assert client.get("/profile", headers=user_b_headers).status_code == 404
 
 
+# --- the profile and the user record it describes -------------------------
+#
+# Two tables hold this person's name: `users.name`, which every label in the
+# workspace reads, and `digital_twin_profile.name`, which the persona is
+# written from. A profile save that changed only the second one looked, from
+# the browser, exactly like a save that had not happened — the form said the
+# new name and the twin switcher, sidebar and report header all said the old
+# one, with no error anywhere.
+
+
+def test_renaming_the_profile_renames_the_twin(
+    client: TestClient, user_headers: Headers
+) -> None:
+    client.put("/profile", json=EXECUTIVE, headers=user_headers)
+    client.put("/profile", json={"name": "Renamed Executive"}, headers=user_headers)
+
+    listed = client.get("/users").json()["items"]
+    twin = next(item for item in listed if item["id"] == user_headers["X-User-ID"])
+
+    assert twin["name"] == "Renamed Executive"
+    assert client.get("/profile", headers=user_headers).json()["name"] == (
+        "Renamed Executive"
+    )
+
+
+def test_the_role_travels_with_the_name(
+    client: TestClient, user_headers: Headers
+) -> None:
+    client.put("/profile", json=EXECUTIVE, headers=user_headers)
+    client.put(
+        "/profile", json={"role": "Chief Executive Officer"}, headers=user_headers
+    )
+
+    listed = client.get("/users").json()["items"]
+    twin = next(item for item in listed if item["id"] == user_headers["X-User-ID"])
+
+    assert twin["role"] == "Chief Executive Officer"
+
+
+def test_an_edit_that_names_nobody_leaves_the_twin_alone(
+    client: TestClient, user_headers: Headers, test_user
+) -> None:
+    """A partial edit is not a rename.
+
+    The profile form sends only the fields a person filled in, so a save from
+    the Preferences tab carries no name at all. Reading that as "set the name
+    to nothing" would blank an identity other rows point at.
+    """
+
+    original = test_user.name
+
+    client.put("/profile", json=EXECUTIVE, headers=user_headers)
+    client.put(
+        "/profile",
+        json={"communication_style": "Terse"},
+        headers=user_headers,
+    )
+
+    listed = client.get("/users").json()["items"]
+    twin = next(item for item in listed if item["id"] == user_headers["X-User-ID"])
+
+    assert twin["name"] == "Test Executive"
+    assert original != "Test Executive"
+
+
+def test_one_persons_rename_never_touches_another(
+    client: TestClient, user_headers: Headers, user_b_headers: Headers
+) -> None:
+    before = client.get("/users").json()["items"]
+    other = next(item for item in before if item["id"] == user_b_headers["X-User-ID"])
+
+    client.put("/profile", json=EXECUTIVE, headers=user_headers)
+    client.put("/profile", json={"name": "Renamed Executive"}, headers=user_headers)
+
+    after = client.get("/users").json()["items"]
+    unchanged = next(
+        item for item in after if item["id"] == user_b_headers["X-User-ID"]
+    )
+
+    assert unchanged["name"] == other["name"]
+
+
 # --- memory ---------------------------------------------------------------
 
 
@@ -458,3 +540,105 @@ def test_retiring_a_memory_does_not_affect_another_user(
         ]
         == 1
     )
+
+
+# --- editing an existing twin --------------------------------------------
+#
+# The Digital Twins workspace posts every text field on every save, and its
+# `organization` input has no fallback value — `profile?.organization ?? ""`.
+# So opening an existing twin, changing one thing and pressing Save sent
+# `organization: ""`, which the schema rejected outright: HTTP 422,
+# `Value error, cannot be blank`, on a field the person had never touched.
+#
+# A blank required field now means "leave it alone" rather than "reject the
+# request". The rule that a profile must name somebody is not weakened — it
+# lives in `profile_service.REQUIRED_ON_CREATE`, which is the only place that
+# can tell a first write from an edit.
+
+
+def _existing_profile(client: TestClient, headers: Headers) -> dict:
+    created = client.put("/profile", json=EXECUTIVE, headers=headers)
+
+    assert created.status_code == 200, created.text
+
+    return created.json()
+
+
+def test_editing_a_twin_and_leaving_organization_blank_saves(
+    client: TestClient, user_headers: Headers
+) -> None:
+    """The exact body the Save button sends. This returned 422."""
+
+    _existing_profile(client, user_headers)
+
+    response = client.put(
+        "/profile",
+        json={
+            "name": EXECUTIVE["name"],
+            "role": "Principal Analyst",
+            "organization": "",
+            "communication_style": "",
+            "responsibilities": [],
+            "expertise": [],
+            "priorities": [],
+            "current_focus": [],
+        },
+        headers=user_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["role"] == "Principal Analyst"
+
+
+def test_a_blank_required_field_keeps_its_stored_value(
+    client: TestClient, user_headers: Headers
+) -> None:
+    """ "Leave it alone" has to mean the column is unchanged, not emptied."""
+
+    before = _existing_profile(client, user_headers)
+
+    response = client.put(
+        "/profile",
+        json={"name": "", "role": "   ", "organization": ""},
+        headers=user_headers,
+    )
+
+    assert response.status_code == 200, response.text
+
+    after = response.json()
+
+    assert after["name"] == before["name"]
+    assert after["role"] == before["role"]
+    assert after["organization"] == before["organization"]
+
+
+def test_a_first_write_with_a_blank_organization_still_says_what_is_missing(
+    client: TestClient, user_headers: Headers
+) -> None:
+    """Creation genuinely needs it, and the answer names the field.
+
+    The status is still 422 — the request cannot be honoured — but it is now a
+    domain error a person can act on rather than a schema error about a field
+    they did not fill in.
+    """
+
+    response = client.put(
+        "/profile",
+        json={"name": "Ada", "role": "Analyst", "organization": ""},
+        headers=user_headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "ProfileIncompleteError"
+    assert "organization" in response.json()["detail"]
+
+
+def test_creating_a_profile_is_unchanged(
+    client: TestClient, user_headers: Headers
+) -> None:
+    """The half of the contract this fix must not have moved."""
+
+    response = client.put("/profile", json=EXECUTIVE, headers=user_headers)
+
+    assert response.status_code == 200
+    assert response.json()["organization"] == EXECUTIVE["organization"]

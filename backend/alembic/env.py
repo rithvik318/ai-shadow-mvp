@@ -25,7 +25,18 @@ if not config.get_main_option("sqlalchemy.url", None):
 database_url = config.get_main_option("sqlalchemy.url")
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers` defaults to True, which switches off every
+    # logger that already exists rather than only reconfiguring the ones this
+    # file names. In a migration run from the command line nothing else has
+    # been created yet, so the default is harmless and invisible. In-process it
+    # is neither: the application's own loggers are already built, and running
+    # a migration silently mutes them for the rest of the process.
+    #
+    # The test suite is where that showed up — a scheduler test asserting on a
+    # logged warning passed alone and failed after the migration tests had run,
+    # but only on a machine with Postgres reachable, because that is the only
+    # place those tests do anything.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

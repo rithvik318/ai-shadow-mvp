@@ -253,10 +253,21 @@ def test_parse_failure_stores_no_chunks(db_session: Session) -> None:
     assert db_session.execute(select(DocumentChunk)).scalars().all() == []
 
 
-def test_document_with_no_extractable_text_is_recorded_as_failed(
+def test_document_with_no_extractable_text_is_recorded_as_needing_ocr(
     db_session: Session,
 ) -> None:
-    """A PDF with no text layer fails visibly rather than indexing empty."""
+    """A PDF with no text layer is recorded visibly rather than indexing empty.
+
+    It used to be recorded as `failed`, and that assertion is why this test
+    changed: thirty such files in the SunRadia corpus made a healthy sync look
+    broken, when nothing had gone wrong with any of them. The format is
+    supported, the parser ran, and the document is a scan. `ocr_required` says
+    that; `failed` said something untrue.
+
+    The raise is deliberately unchanged. `NoTextLayerError` is an
+    `EmptyDocumentError`, so this endpoint still answers 422 to a person who
+    uploads a scan by hand — what moved is the classification, not the API.
+    """
 
     with pytest.raises(EmptyDocumentError):
         ingest_document(
@@ -267,7 +278,7 @@ def test_document_with_no_extractable_text_is_recorded_as_failed(
         )
 
     document = db_session.execute(select(Document)).scalars().one()
-    assert document.status == DocumentStatus.FAILED
+    assert document.status == DocumentStatus.OCR_REQUIRED
 
 
 def test_embedding_failure_marks_the_document_failed(

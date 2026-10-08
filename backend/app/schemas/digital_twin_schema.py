@@ -36,11 +36,28 @@ class ProfileRequest(BaseModel):
 
     @field_validator("name", "role", "organization")
     @classmethod
-    def reject_blank(cls, value: str | None) -> str | None:
-        """`max_length` alone would accept a string of spaces."""
+    def blank_means_unchanged(cls, value: str | None) -> str | None:
+        """A blank required field means "leave it alone", not "reject the save".
 
-        if value is not None and not value.strip():
-            raise ValueError("cannot be blank")
+        These three back NOT NULL columns, so a blank must never be *written* —
+        but rejecting the request outright was the wrong way to prevent that,
+        and it is what returned `422 Value error, cannot be blank` when
+        somebody edited an existing twin and pressed Save. The Digital Twins
+        form posts every text field on every save, and `organization` has no
+        fallback value, so any profile without one failed on a field the person
+        had not touched.
+
+        Returning None instead makes `supplied()` drop the field — it excludes
+        None — which is exactly the "absent keys are left alone" contract
+        `upsert_profile` already documents. The rule that a profile must name
+        somebody is not weakened, only moved to the one place that can tell a
+        create from an edit: `REQUIRED_ON_CREATE` in `profile_service`, which
+        raises `ProfileIncompleteError` naming the missing fields. Validation
+        here stays about shape; the domain rule stays in the domain.
+        """
+
+        if value is None or not value.strip():
+            return None
 
         return value
 

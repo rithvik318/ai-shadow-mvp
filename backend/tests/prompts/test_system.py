@@ -15,6 +15,9 @@ EXPECTED_PROMPT_NAMES = [
     "email_transform",
     "email_triage",
     "rag_answer",
+    "report_cross_period",
+    "report_period_synthesis",
+    "report_thread_analysis",
 ]
 
 

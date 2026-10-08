@@ -22,7 +22,7 @@ already regretted once, with `langchain-text-splitters`.
 import logging
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import httpx
@@ -57,6 +57,25 @@ _RETRYABLE_STATUS = frozenset({429, 503, 504})
 # down, and the caller should hear about it rather than block for minutes.
 _MAX_RETRY_ATTEMPTS = 5
 _MAX_RETRY_WAIT_SECONDS = 60.0
+
+# The ceiling that actually bounds a run. Per-attempt caps do not: five attempts
+# each honouring a 60-second `Retry-After` is five minutes of sleeping inside
+# one file, and a folder of several hundred throttled files turns that into a
+# sync measured in days. Once this much has been spent waiting, the answer
+# already is "not now" — returning it lets the file be recorded as transient and
+# retried on the next run, which is cheaper than holding the run open for it.
+_MAX_TOTAL_RETRY_SECONDS = 120.0
+
+# Statuses a *download* will keep returning however many times it is asked.
+# 401 and 403 are the exception and are handled before this is consulted: on a
+# pre-authorised storage URL they almost always mean the URL has expired rather
+# than that access is refused, which is a different remedy — mint a new one.
+_PERMANENT_DOWNLOAD_STATUS = frozenset({400, 404, 405, 410, 414, 416})
+
+# What an expired pre-authorised download URL answers. Graph mints these with a
+# life of roughly an hour, so any run that enumerates first and downloads later
+# will meet them; the fix is a fresh URL, not a retry of the stale one.
+_EXPIRED_URL_STATUS = frozenset({401, 403})
 
 
 class GraphClient:
@@ -222,17 +241,27 @@ class GraphClient:
             )
 
         if response.status_code in (401, 403):
-            # Files.Read.All is named alone deliberately. As an *application*
-            # permission it already covers files in all site collections,
-            # SharePoint document libraries included; Sites.Read.All governs
-            # the /sites discovery endpoints, which nothing here calls.
-            # Naming it here sent people granting a permission that could not
-            # have been the cause.
+            # Deliberately names no permission. This client serves files, mail
+            # and calendar, which are three separate admin consents, and it
+            # cannot see which one the caller was exercising. It used to say
+            # `Files.Read.All` unconditionally — correct for a sync, and
+            # actively misleading everywhere else: a calendar 403 told the
+            # reader to re-grant a files permission that could not possibly
+            # have been the cause. That is the exact failure this project
+            # already recorded once, in the other direction, when the message
+            # named `Sites.Read.All`.
+            #
+            # The status and code travel on the exception, so the layer that
+            # does know which API it called — `calendar_service.status`,
+            # `outlook_provider.status`, `source_resolver` — names the consent.
             raise GraphAuthError(
                 f"Graph denied the request (HTTP {response.status_code}"
-                f"{f', {code}' if code else ''}). Either the application lacks "
-                "admin-consented Files.Read.All, or the content is outside "
-                "this tenant, which no consent can change."
+                f"{f', {code}' if code else ''}). This application's Graph "
+                "permissions are granted per API, so the one to check is the "
+                "one for the call that failed. The other possibility is "
+                "content outside this tenant, which no consent can change.",
+                status_code=response.status_code,
+                graph_code=code or None,
             )
 
         raise GraphRequestError(
@@ -240,16 +269,19 @@ class GraphClient:
             f"{f', {code}' if code else ''}): {_safe_path(url)}"
         )
 
-    def _retry_after(self, response: httpx.Response, attempt: int) -> float:
+    def _retry_after(self, response: httpx.Response | None, attempt: int) -> float:
         """How long to wait before retrying, in seconds.
 
         Graph's `Retry-After` is authoritative and is honoured as given; it is
         the far end telling us its own rate. Only when the header is absent or
         unreadable does this fall back to exponential backoff, and the result
         is capped either way so one hostile header cannot stall a sync run.
+
+        `response` is None when the request never produced one — a transport
+        error — which is simply the case where there is no header to read.
         """
 
-        header = response.headers.get("Retry-After", "")
+        header = "" if response is None else response.headers.get("Retry-After", "")
 
         try:
             seconds = float(header)
@@ -285,6 +317,7 @@ class GraphClient:
         """
 
         last: httpx.Response | None = None
+        spent = 0.0
 
         for attempt in range(_MAX_RETRY_ATTEMPTS):
             try:
@@ -298,9 +331,41 @@ class GraphClient:
                         follow_redirects=follow_redirects,
                     )
             except httpx.HTTPError as exc:
-                raise GraphRequestError(
-                    f"Could not reach Graph ({type(exc).__name__}): {_safe_path(url)}"
-                ) from exc
+                # A dropped read or a connection reset is the most literal
+                # "not now" there is — no status came back at all — and until
+                # now it was the one thing this loop did not retry. One
+                # `ReadError` on one file therefore marked an 800-file run
+                # `partial` and withheld its delta token, which is a whole
+                # re-enumeration paid for a hiccup.
+                #
+                # Retried under the same budget as throttling, with the same
+                # backoff. If the budget or the attempts run out the failure is
+                # raised `transient=True`: the bytes were never seen, so the
+                # token must not move past this file.
+                wait = self._retry_after(None, attempt)
+
+                if attempt + 1 >= _MAX_RETRY_ATTEMPTS or spent + wait > (
+                    _MAX_TOTAL_RETRY_SECONDS
+                ):
+                    raise GraphRequestError(
+                        f"Could not reach Graph ({type(exc).__name__}) after "
+                        f"{attempt + 1} attempt(s): {_safe_path(url)}",
+                        transient=True,
+                    ) from exc
+
+                logger.warning(
+                    "graph_transport_error_retried",
+                    extra={
+                        "error": type(exc).__name__,
+                        "attempt": attempt + 1,
+                        "wait_seconds": wait,
+                        "path": _safe_path(url),
+                    },
+                )
+
+                time.sleep(wait)
+                spent += wait
+                continue
 
             if response.status_code not in _RETRYABLE_STATUS:
                 return response
@@ -320,8 +385,19 @@ class GraphClient:
                 },
             )
 
+            # Stop when the *budget* is gone, not only when the attempts are.
+            # Without this a file can sit here for five minutes, and several
+            # hundred of them turn one sync into a multi-day run.
+            if spent + wait > _MAX_TOTAL_RETRY_SECONDS:
+                logger.warning(
+                    "graph_retry_budget_exhausted",
+                    extra={"spent_seconds": round(spent, 1), "path": _safe_path(url)},
+                )
+                return response
+
             if attempt + 1 < _MAX_RETRY_ATTEMPTS:
                 time.sleep(wait)
+                spent += wait
 
         assert last is not None  # noqa: S101 - the loop runs at least once
 
@@ -408,6 +484,36 @@ class GraphClient:
 
             return items, payload.get("@odata.deltaLink")
 
+    def redirect_location(self, path_or_url: str) -> str | None:
+        """Ask Graph for a resource and return where it points, without going.
+
+        `/content` answers `302` with a freshly minted, pre-authorised URL in
+        `Location`. Following that redirect here would carry the bearer token to
+        a storage host that has no business holding one — which is why the
+        redirect is deliberately *not* followed. The caller fetches the location
+        separately, unauthenticated, through `download()`.
+
+        Returns None when Graph answered something other than a redirect, so the
+        caller can fall back rather than treat it as a failure.
+        """
+
+        url = self._absolute(path_or_url)
+        response = self._send(
+            "GET",
+            url,
+            headers={"Authorization": f"Bearer {self.access_token()}"},
+            follow_redirects=False,
+        )
+
+        if response.status_code in (301, 302, 303, 307, 308):
+            return response.headers.get("Location")
+
+        # Not a redirect. Let the normal translation decide whether that is an
+        # error worth raising — a 404 here is a real answer about the item.
+        self._raise_for_status(response, url)
+
+        return None
+
     def resolve_redirect(self, url: str) -> str:
         """Follow a shortened Microsoft link to the URL it stands for.
 
@@ -430,12 +536,24 @@ class GraphClient:
 
         return str(self._send("GET", url, follow_redirects=True).url)
 
-    def download(self, url: str) -> bytes:
-        """Fetch a file's bytes.
+    def download(self, url: str, *, refresh: Callable[[], str] | None = None) -> bytes:
+        """Fetch a file's bytes, re-minting the URL once if it has expired.
 
-        Graph's download URLs are pre-authorised and short-lived, so no bearer
-        token is attached — sending one to the storage host would leak it
-        somewhere it is not needed.
+        Graph's download URLs are pre-authorised and short-lived — roughly an
+        hour — so no bearer token is attached: sending one to the storage host
+        would leak it somewhere it is not needed.
+
+        That short life is the whole reason `refresh` exists. Any caller that
+        enumerates a folder first and downloads afterwards is holding URLs that
+        were minted before the run began, and every one of them goes stale while
+        the run is still working through the list. An expired URL answers 401 or
+        403, which is indistinguishable from "forbidden" by status alone and was
+        previously recorded as a failure — so a long sync failed every file
+        after its first hour, and the failures looked like a permissions
+        problem. `refresh` is called **once**, and only for those two statuses,
+        to ask Graph for a current URL. Once, because a refreshed URL that is
+        also refused is telling us something real, and a loop there would be an
+        unbounded retry against the one status that will not change.
         """
 
         # No Authorization header: these URLs are pre-authorised and point at
@@ -444,10 +562,41 @@ class GraphClient:
         # on its downloads as readily as on its listings.
         response = self._send("GET", url, follow_redirects=True)
 
-        if response.status_code >= 400:
-            raise GraphRequestError(f"Download failed (HTTP {response.status_code}).")
+        if response.status_code in _EXPIRED_URL_STATUS and refresh is not None:
+            logger.info(
+                "graph_download_url_refreshed", extra={"status": response.status_code}
+            )
+            response = self._send("GET", refresh(), follow_redirects=True)
 
-        return response.content
+        if response.status_code < 400:
+            return response.content
+
+        status = response.status_code
+
+        if status in _EXPIRED_URL_STATUS:
+            # Either no refresher was offered, or a freshly minted URL was
+            # refused too. Permanent: the remedy is a consent change, not
+            # another attempt, and retrying would hold the delta token back
+            # forever over a file nothing can read.
+            raise GraphRequestError(
+                f"Download refused (HTTP {status}) — the pre-authorised URL was "
+                "rejected even after being re-minted, so the application does "
+                "not have access to this item.",
+                transient=False,
+            )
+
+        if status in _PERMANENT_DOWNLOAD_STATUS:
+            raise GraphRequestError(
+                f"Download failed permanently (HTTP {status}).", transient=False
+            )
+
+        # 429 and 5xx arrive here only once `_send` has exhausted its retries or
+        # its budget. Still transient: the content was never seen, so the delta
+        # token must not move past it.
+        raise GraphRequestError(
+            f"Download failed (HTTP {status}); it may succeed on a later run.",
+            transient=True,
+        )
 
 
 def _safe_path(url: str) -> str:

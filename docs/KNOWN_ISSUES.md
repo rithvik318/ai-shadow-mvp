@@ -6,31 +6,222 @@ Current gaps, limitations and accepted tradeoffs. For what exists, see [`FEATURE
 
 ## Limitations
 
+### Live activity reports read 255-character previews, and counted unsent drafts as received mail
+Found in the pre-deployment audit of 2026-09-29. `OutlookEmailProvider.list_messages` selected `bodyPreview` and never `body`, so every *live* report (`correspondence.from_provider`) analysed the first 255 characters of each message — while the collected corpus the pipeline had been validated on carries full bodies. A commitment made after the first paragraph was invisible to a production report. And `/users/{mailbox}/messages` spans every folder, Drafts included: an unsent draft has no `from`, so it entered the report as inbound mail from nobody.
+
+A windowed listing (the report path; `since`/`until` given) now selects `body` and `isDraft`, pages at `WINDOW_PAGE_SIZE` (50, the size the collector reads this tenant with), and drops drafts. `correspondence` converts HTML bodies to text the same way the collector does. The un-windowed inbox listing is unchanged. Pinned by `tests/services/email/provider/test_windowed_listing.py`.
+
+**Still open:** the all-folders read also includes Deleted Items and Junk Email, and a message a rule copied into a second folder is counted twice (different Graph ids, same `internetMessageId`). The live `/messages` listing itself has still never run against the tenant (the collector's per-folder reads have); the first post-deployment smoke test is its first real exercise.
+- **Impact:** previews and drafts closed; deleted/junk/duplicate copies open (quality, not fabrication).
+- **Priority:** Medium for the remainder.
+
+### The activity report was a count, and the Digital Twin form could not save
+Both closed in the same change, and both were the same kind of defect: a layer discarding what the layer above it needed.
+
+**Reports.** `activity_report.py` assembled its sentences from an `EmailDigest`, which holds counts, a category tally and a list of correspondents. Message bodies and conversation ids were discarded two layers earlier, so the best possible report was a summary of counts — "200 received, 0 sent, 2 tasks open" — and no prompt could have fixed it because there was no model in the path at all. That module was a deliberate design, argued in its own docstring; it is now the fallback rather than the only path, and the evidence-based pipeline described in `FEATURES.md` is the default. The old deterministic report and both digest endpoints are unchanged.
+
+**Digital Twin save.** `PUT /profile` answered `422 Value error, cannot be blank` when an existing twin was edited. The workspace form posts every text field on every save and its `organization` input has no fallback value, so any profile without one failed on a field the person had never touched. A blank required field now means "leave it alone"; the rule that a profile must name somebody moved to `profile_service.REQUIRED_ON_CREATE`, which is the only place that can tell a first write from an edit, and the form omits blanks and marks the three fields required on creation.
+- **Impact:** closed.
+- **Priority:** —
+
+### The detailed activity report answered HTTP 500, and the screen hid it
+Three defects, found together because the first one made the other two visible.
+
+**The 500.** `report_routes.activity_report` decided whether to use a model with `bool(settings.OPENAI_API_KEY or settings.LLM_API_KEY)`. There is no `LLM_API_KEY` setting — `Settings` defines `OPENAI_API_KEY` and `OPENROUTER_API_KEY` — so pydantic raised `AttributeError` and FastAPI returned 500. It only fired once a mailbox was genuinely connected, because every request without one returns 409 several lines earlier, and the two route tests that existed took exactly that path. 1,608 passing tests never executed the line. The question is now asked of `llm_client.llm_configured()`, which reads the key belonging to the provider `LLM_PROVIDER` names, and `tests/api/test_report_routes.py::TestActivityReportWithAMailbox` runs the route end to end against a stub mailbox.
+
+**The reports screen hid it.** `ReportsPanel` fell back to the stored email digest whenever the detailed report was absent, for any reason, so the 500 rendered as a small error line above "83 messages received and 0 messages sent" — a report-shaped screen that looked like it was working. The fallback is now keyed on *why* the request failed (`lib/reportFault.ts`): a 409 with `EmailProviderNotConfiguredError` is a configuration state and the digest stands in, saying so; anything else is a fault and nothing stands in for it.
+
+**Half the correspondence was never read.** `correspondence.from_provider` looked for `provider.list_sent_messages` via `getattr`, which no provider implements and `EmailProvider` does not declare, so `None` came back and the outbound half was skipped silently. Every live report described the inbox and none of the owner's replies. Both directions now come from `list_messages(folder=...)`, which is the declared contract, and truncation is detected by whether the listing reached back past the start of the period rather than by a limit the provider is free to ignore.
+- **Impact:** closed.
+- **Priority:** —
+
+### A Digital Twin's name lived in two tables and only one of them was written
+`users.name` and `users.role` are what the workspace displays — the twin switcher, the sidebar, the workspace header, a report's owner line — and `digital_twin_profile.name` and `.role` are what the persona is written from. `PUT /profile` wrote only the second pair, so renaming a twin on its Profile tab saved successfully, changed nothing anybody could see, and survived a reload that way. `profile_service._apply_to_identity` now writes a supplied name or role onto the user record in the same transaction; a save that carries neither leaves both alone, which is what keeps a Preferences-tab edit from blanking an identity other rows point at. On the client, `TwinsPanel` holds the open twin's id rather than a copy of the row, and a saved profile re-reads the twin list, so the new name appears without a reload.
+- **Impact:** closed.
+- **Priority:** —
+
+### The activity report took minutes, and the log said only that a batch had failed
+One request, 18 model calls, no ceiling on any of them, and nothing in the log to say so. Four causes, all measured against a stub provider before being changed.
+
+**Every conversation was analysed twice.** A month is reported week by week *and* as a whole, and each pass ran its own per-conversation analysis over the same threads. The weekly sections use only each week's synthesis, so the thread analysis now runs once over the period and each week is given the slice of it that belongs to it: 18 calls became 11 on the August corpus, with the same report at the end.
+
+**Nothing bounded the total.** The calls are sequential, so response time was the provider's latency times the number of conversations. `REPORT_ANALYSIS_BUDGET_SECONDS` (90 by default) now bounds them together: when it is spent the remaining conversations are described structurally and the report says so in its header, which is the same degradation the pipeline already performs with no model configured. Measured against a provider answering in 30s: 90s instead of 9 minutes.
+
+**Each call inherited the OpenAI SDK's defaults** — a 600-second read timeout and two automatic retries — so one unanswered call could hold a request for half an hour and a failing provider turned 18 calls into 54 HTTP attempts. `LLM_TIMEOUT_SECONDS` and `LLM_MAX_RETRIES` are now set on every client in `llm/client.py`.
+
+**The log could not say which of these it was.** `report_thread_batch_failed` put the exception type in a `logging` `extra` dict that the default formatter does not print, and nothing configured the root logger at all, so every INFO line this codebase writes was discarded. `app/main.py` now configures logging from `LOG_LEVEL`, and the pipeline logs request start, period, message count, per-batch outcome, failed batch index, exception type and message, and elapsed time at each stage. Batch failures carry `exc_info`, so the traceback is in the log. No line carries a subject, a body or an address — `test_a_log_line_carries_no_correspondence` pins that.
+
+Two smaller things came out of the same investigation. `AnalysisEngine` now distinguishes an empty model response — routine for a model that answers in a reasoning channel — from malformed JSON, and reads an object out of a reply that wrapped it in prose rather than losing the batch. And `scripts/diagnose_activity_report.py` runs one report against the live configuration and prints every model call, its timing, its exception and its cause, because a pipeline designed to degrade quietly cannot be diagnosed from its output.
+- **Impact:** closed.
+- **Priority:** —
+
+### The Reports page ran the analysis more than once per visit
+The effect that generates the detailed report was keyed on the period *object*. Every reload of the page's data — switching twin, changing the mailbox, re-reading the stored snapshot — produces an equal period with a fresh identity, so it re-ran a minutes-long pipeline for a question that had not changed, and with nothing tracking what was in flight, two could run at once and the slower one would win. It is now keyed on `user:reportType:period.key`, a superseded response is discarded rather than rendered, and Regenerate deliberately bypasses the guard because repeating the work is the point of it. `src/tests/reportsPanelRequests.test.tsx` mounts the real page in jsdom and counts the requests.
+- **Impact:** closed.
+- **Priority:** —
+
+### The activity report was recomputed on every request, including for periods that had closed
+`GET /reports/activity` was a pipeline with a URL. Every request read the mailbox, classified and threaded it, made a dozen model calls and composed a document — for a week that had ended a fortnight earlier and could not possibly have a different answer. Measured live: 7–13 September did not return after 200 seconds, and 14–20 September took about 60 for a single day of data. Nothing was stored, so the second reader paid the same price as the first, for the same document.
+
+Closed by storing the report. `activity_report` holds one row per `(user_id, period_start, period_end, report_version)`; `activity_store` owns the reuse rules and `activity_service` the sequence. A closed window is answered from the database. A running one is served while fresh and otherwise revalidated against a fingerprint of the correspondence, which costs a mailbox read and no model calls when nothing has arrived. `POST /reports/activity` is the only rebuild.
+
+Kept separate from `generated_report` deliberately, and the separation is the design rather than duplication. That table's whole rule is that a stored report is immutable and a row is either the report or an explanation of its absence; this one is keyed on an arbitrary window rather than a period key, carries a version, and needs a `generating` state, which is a claim on work in progress rather than a report. Putting that state into `report_status` would weaken the guarantee the digest table exists to make.
+- **Impact:** closed.
+- **Priority:** —
+
 ### No authentication
 There is no auth layer. A caller states who they are with the `X-User-ID` header and is believed.
 - **Impact:** any caller can act as any user. Do not store production data in it.
 - **Mitigation in place:** the Digital Twin is genuinely user-scoped — `users` exists, profile and memory are UUID-keyed to it, and every query filters on that key — so adding auth is a change to where the identity comes from, not a migration or a backfill. The knowledge base is shared by design and is not affected.
 - **Priority:** High — before real user data.
 
-### The corpus has not yet been ingested through Graph
-Credentials are in place and the owner reports that token acquisition,
-`Files.Read.All` consent and drive visibility all work from their machine. That
-verification is theirs; **no synchronisation has been run from this
-repository's own code against a live tenant**, and every Graph behaviour here
-is verified against a mock transport only. The five configured folders have
-therefore never been resolved to real ids, and nothing has been downloaded.
-- **Impact:** discovery counts, real throttling behaviour, folder resolution against the actual drive, and the true supported/unsupported split across the corpus are all unmeasured. The corpus is not in the knowledge base.
-- **Mitigation in place:** `python -m scripts.discover_onedrive_sources --resolve` resolves every configured folder read-only and reports what it could not find, so the first contact with Graph enumerates rather than ingests, and a wrong path is discovered before any embedding is paid for.
-- **Priority:** High — this is the last unverified link in the chain.
+### Three files ended a sync with "Ingestion failed unexpectedly (ValueError)"
+One systemic defect, not three, and PostgreSQL-only — which is why the whole
+suite passed while `PIM_Functional_Processes_v0.95.html`,
+`Solution Delivery Roadmap _v0.05.html` and `Summary View.pdf` could not be
+ingested. **PostgreSQL's `text` cannot hold U+0000**, and psycopg2 refuses the
+parameter with `ValueError: A string literal cannot contain NUL (0x00)
+characters` — an error from outside `DocumentError`, so it surfaced as the
+uninformative "Ingestion failed unexpectedly (ValueError)". SQLite stores NULs
+without complaint. Same invisibility class as the VARCHAR widths (0013) and the
+INTEGER width (0014).
 
-### The knowledge-base folders were shared as `1drv.ms` links
-The five folders were supplied as shortened Microsoft sharing links rather than
-as paths in a known drive. A short link hides which service holds the content,
-and that is the fact deciding whether an application-only token can reach it at
-all — so it has to be followed before anything can be concluded.
-- **Impact:** until each link's destination host is known, a `403` from Graph is ambiguous between "the application lacks consent for this tenant's content" and "the content is not in this tenant at all". The second cannot be fixed by any permission grant, and mistaking it for the first is an open-ended loop of granting permissions.
-- **Mitigation in place:** `python -m scripts.discover_onedrive_sources --diagnose` follows each link, classifies the destination, and reports a separate verdict per source — `resolved`, `not_found`, `access_denied`, `outside_tenant` or `unreachable` — with the remedy that matches. `outside_tenant` is decided from the host without asking Graph, precisely so its `403` cannot be misread.
-- **Priority:** High — it gates the corpus.
+Two things produced the NULs, and both are fixed:
+
+1. **Encoding detection could not fail safely.** The two HTML files are
+   MindManager exports in UTF-16LE with a `\xff\xfe` byte-order mark. `_decode`
+   tried `utf-8-sig`, `utf-8`, then `cp1252` — and `cp1252` maps almost every
+   byte, so it did not raise. It returned mojibake beginning `ÿþ<\x00h\x00t…`
+   with 19,741 NULs in it. `_decode` now honours byte-order marks before
+   guessing, and recognises BOM-less UTF-16 by its NUL pattern.
+2. **Nothing sanitised extracted text.** `Summary View.pdf` has no encoding
+   problem at all: it is an ordinary readable six-page PDF whose font's
+   ToUnicode CMap maps a handful of glyphs to U+0000, giving thirteen stray
+   NULs. Control characters are now stripped once, at the `parse_document`
+   boundary, so no format can bypass it — tab, newline and carriage return
+   kept, everything else in C0/C1 dropped.
+
+Verified against a real PostgreSQL 16: the reported `ValueError` reproduces on
+an unsanitised insert, and both files now parse to clean text and index.
+- **Impact:** closed. The class is closed too — sanitising is at the boundary rather than per-format.
+- **Priority:** —
+
+### A dropped read failed a file that would have succeeded
+`Sun Radia Capabilities Case Studies and Services.pptx` failed on an
+`httpx.ReadError`. The client retried 429, 503 and 504 and nothing else, so the
+most literal "not now" there is — no status came back at all — was the one
+condition never retried. One hiccup on one file marked an 800-file run
+`partial` and withheld its delta token, paying for a re-enumeration. Transport
+errors are now retried under the same budget and backoff as throttling; if the
+budget runs out the failure is raised `transient=True`, because the bytes were
+never seen.
+- **Impact:** closed.
+- **Priority:** —
+
+### 30 files are scans, and are deferred rather than failed
+Supported format, successful download, parser ran to completion, no text in the
+document. These were counted as application failures, which inflated the
+failure count of a healthy run and hid a backlog whose only remedy nobody can
+apply by retrying.
+
+They now have a status of their own — `ocr_required`, tagged
+`OCR_REQUIRED / NO_TEXT_LAYER` in the reason — distinct from `failed` (which
+means something went wrong and a retry may work) and from `unsupported` (which
+means no parser exists for the format). Each leaves a durable row, so "which
+documents need OCR" is a query; the sync counts them apart from failures, so a
+corpus of scans no longer blocks acceptance; and the delta token still advances
+over them, because they were genuinely dealt with. Migration 0015 adds the
+status, widens `documents.status` to `VARCHAR(12)`, **rewrites the
+`document_status` CHECK constraint** — the half that is easy to miss, and that
+`tests/database/test_migration_fidelity.py` now guards generically — and adds
+`onedrive_sync_state.last_ocr_required`.
+- **Impact:** OCR is deliberately not implemented. These documents are listed, not indexed, and `scripts/diagnose_onedrive_corpus.py` names them.
+- **Priority:** Low — a known backlog with a known remedy, tracked in `ROADMAP.md`.
+
+### A whole live run indexed nothing, and called itself a success
+The corrected sync ran over 859 items: 372 rejected before download, **487
+downloads failed, 0 files indexed** — and it reported `succeeded` and advanced
+its delta token past all 487. Two defects, and the second is the dangerous one.
+
+1. **The downloader was broken.** `fresh_download_url` asked for the item with
+   `$select=id,@microsoft.graph.downloadUrl`. That is an *instance annotation*,
+   not a property, and Graph does not reliably return it under `$select`, so
+   the lookup yielded an item with no URL — which the code called a permanent
+   failure. Every file. Fixed by asking `/content` for its `302` and reading
+   `Location` without following it, which is defined for every file item and
+   leaks no bearer token; the annotation remains as a fallback.
+2. **A run that read nothing was trusted anyway.** Advancing the token on "no
+   transient failures" buried the whole corpus, because a delta only ever
+   returns what changed *after* the token. The rule now also refuses to advance
+   when downloads failed and not one succeeded, on the reasoning that a
+   downloader breaking is far likelier than that many files each being
+   independently unreadable. A corrupt PDF still counts as read — its bytes
+   arrived.
+
+`succeeded` now means every discovered file was dealt with; any failure makes
+the run `partial`. And every failed download leaves a `failed` document row
+carrying the filename, declared type, reported size and Graph's own reason, so
+"which files failed, by extension, by MIME type, by reason" is a query rather
+than a guess. `scripts/diagnose_onedrive_corpus.py --probe` answers the same
+questions against the live drive without downloading anything.
+
+There was a third, quieter defect: **the validation script agreed with the
+sync.** It treated `succeeded` as proof of ingestion, and its retrieval stage
+counted the whole corpus — which already held 268 documents from an earlier
+staged import — so a run that read nothing scored three passes and exited 0.
+Both are closed. A run that discovered files and successfully read none of them
+is now reported as `INGESTION: FAILED` and votes the exit status non-zero, and
+the retrieval stage splits "written during this run" from "already present
+beforehand" and says plainly when everything it found predates the run.
+`tests/scripts/test_operational_scripts.py` pins both, along with the
+diagnostic's exit status, without needing a tenant.
+- **Impact:** the knowledge base still holds only the earlier staged corpus. The delta token advanced once while broken, so **a full resync (`--full`) is required** — an incremental run would never re-offer those 487 files.
+- **Priority:** High — the fix is in, and it has not yet been run live.
+
+### The corpus is partly ingested, and the first real run exposed three defects
+A real synchronisation has now run against the live tenant. It discovered all
+847 files and ended `partial` after roughly 25 hours: 94 indexed, 41 unchanged,
+292 unsupported, 420 failed, with the delta token withheld. Three defects
+compounded to produce that, and all three are fixed:
+
+1. **Every pre-authorised download URL was minted during enumeration.** Graph
+   gives them about an hour; the run spent 25. Every file reached after the
+   first hour answered 403 and was recorded as a failure.
+2. **A 403 was classified transient.** So was every other download failure —
+   `transient=True` was hard-coded — which withheld the delta token, so the
+   next run would have re-enumerated all 847 files and done it again.
+3. **Nothing was rejected before being downloaded.** All 292 unsupported files
+   were fetched in full and then refused on their extension.
+
+The wall-clock was serial downloads plus an unbounded retry budget: five
+attempts each honouring a 60-second `Retry-After` is five minutes inside one
+file.
+- **Impact:** the knowledge base holds 135 of 847 files. The counts above are the *old* classification, so the supported/unsupported split will move once a run uses the new parsers — `.xlsx` and `.html` were counted as unsupported and are now read.
+- **Mitigation in place:** URLs are re-minted once on 401/403; failures are classified by status and only genuinely transient ones hold the token; unsupported formats are decided from the listing and never downloaded; downloads run in bounded concurrent batches; retries stop on a total time budget; and a `partial` run now records the causes and their counts rather than only a total.
+- **Priority:** High — the next run is expected to finish in well under an hour and to advance the token. **It has not been run**; every claim here is from the code and its tests, not from a second live sync.
+
+### The exact HTTP statuses behind the first run's 420 failures were not recorded
+Per-file reasons existed in the `POST /sync/onedrive` response body and in the
+application log, but `onedrive_sync_state.error_message` persisted only
+`"405 file(s) failed transiently; delta token not advanced."` — so a run nobody
+watched left no way to tell an expired URL from a throttled one.
+- **Impact:** the 405-vs-15 split between transient and permanent in that run cannot be attributed to specific statuses after the fact. The expired-URL diagnosis rests on the code path — URLs minted at enumeration, a 25-hour run, 403 not retried — and on 427 files having been fetched before the failures began, not on a recorded status.
+- **Mitigation in place:** `_describe_failures` now writes the distinct reasons and their counts into `error_message`, capped at the five most common, so the next `partial` run is self-explaining.
+- **Priority:** Resolved for future runs; the first run's detail is gone.
+
+### The Knowledge Base needs a user principal name that cannot be derived
+Largely resolved. The folders were first supplied as shortened `1drv.ms`
+sharing links, which hide which service holds the content — the fact that
+decides whether an application-only token can reach them at all. An in-tenant
+address has since been supplied
+(`sunradia-my.sharepoint.com/personal/sudha_gummuluru_sunradia_com/…/Knowledge
+Base`), so the content is a SunRadia-managed OneDrive for Business location and
+`Files.Read.All` covers it. One gap remains: a personal site name replaces
+every `@` and `.` with `_`, so `sudha_gummuluru_sunradia_com` cannot be turned
+back into an address.
+- **Impact:** the `user` field in `ONEDRIVE_SOURCES` has to be filled in by somebody who knows the address. Guessing it would resolve to a different person's drive, or to none, and neither failure announces itself.
+- **Mitigation in place:** `python -m scripts.discover_onedrive_sources --url "<url>"` reads the address offline and prints the entry to paste, with `<user>@example.com` left as a placeholder rather than a guess, and the `Documents` library prefix already stripped — keeping it produces a 404 on a folder that plainly exists. `--diagnose` still classifies any remaining share link, and `outside_tenant` is decided from the host without asking Graph, precisely so its `403` cannot be misread.
+- **Priority:** High — it gates the corpus, and it is now one address away.
 
 ### `Files.Read.All` was over-specified as needing `Sites.Read.All`
 Earlier configuration notes and the Graph client's own `403` message told
@@ -69,6 +260,32 @@ application permissions have not been granted to the Entra application.
 - **Impact:** listing an inbox and sending do not work. Every Graph mail request shape in this repository is asserted against recorded payloads, not against a live tenant, so the response mapping could still be wrong in ways only a real mailbox will show.
 - **Mitigation in place:** the unconnected state is a supported, tested state rather than a failure — composing, revising, templates, drafts and triage of a supplied message all work without a mailbox. `GET /email/provider/status` reports exactly what is missing and distinguishes "not configured" from "configured but refused", because those need different fixes. There is no simulated provider, so nothing can appear to work when it does not.
 - **Priority:** High — it is the only thing between the Email Agent and real use.
+
+### Calendars.Read has not been granted
+The first live check returned Graph `403 ErrorAccessDenied` for
+`GET /users/{mailbox}/calendar`. `Calendars.Read` is a third application
+consent on the same Entra application; neither `Files.Read.All` nor `Mail.Read`
+covers it.
+- **Impact:** `POST /calendar/import` cannot run, so reports show the calendar as not read — which is true, and is deliberately distinct from showing a free week.
+- **Mitigation in place:** `GET /calendar/status` reports it without raising and names `Calendars.Read` specifically, saying that re-granting the other two cannot help. The client no longer names a permission it cannot know about: it serves three APIs with three consents and now reports the status and code, leaving the naming to the layer that knows which call failed.
+- **Priority:** High — one administrator action, no code change.
+
+### No calendar payload has ever been parsed
+The tenant has now been reached and refused, so the *connection* is understood —
+but no Graph calendar payload has passed through `to_event`, because the 403
+comes before any event is returned.
+- **Impact:** every request shape and every mapping here is asserted against constructed payloads. Recurring-series expansion through `/calendarView` and Graph's `{dateTime, timeZone}` pair are the two most likely places for a surprise, and neither can be settled until consent is granted.
+- **Mitigation in place:** the refused state is a supported, tested state rather than a failure. The reports distinguish three states — not read, read and empty, read with meetings — so an unread calendar can never display as a free week, and `POST /calendar/import` refuses with a `503` rather than returning an empty result that would look like a quiet week.
+- **Priority:** High, but blocked behind the consent above.
+
+### Nothing imports the calendar on a schedule
+`POST /calendar/import` is explicit and per-user. A report shows the meetings
+that have been imported, so a report generated before anybody imports a window
+says the calendar was not read — which is true, and is not the same as saying
+the week was free.
+- **Impact:** somebody has to press Import, or call the endpoint, for a period's meetings to appear in that period's report.
+- **Mitigation in place:** the weekly work view has the button, and it imports exactly the window the report covers. `calendar_connected` is answered from rows rather than from consent, so the report never claims a calendar it has not actually received.
+- **Priority:** Medium — scheduling it is a few lines in `SyncScheduler`, deliberately not added until somebody wants it, because an automatic import is the first step toward the autonomous behaviour this MVP excludes.
 
 ### Mail permissions are separate from file permissions
 The Email Agent shares the Entra application OneDrive sync uses, but
@@ -136,6 +353,29 @@ A document can be `failed` because it could not be parsed (no chunks) or because
 - **Impact:** an operator has to check whether chunks exist to know whether a backfill will help.
 - **Mitigation in place:** `count_unembedded_chunks()` answers it in one query, and the backfill is safe to run either way.
 - **Priority:** Low — a distinct status would be clearer if this becomes common.
+
+### A rejected file's recorded size is bounded by the drive, not by the upload limit
+`documents.file_size_bytes` holds the size a file *reported*, not the size of
+something this application accepted — a synchronised file rejected for being too
+large is still recorded, so the corpus can say what it is missing. The first
+real sync met a 6,788,146,857-byte Teams recording in the Knowledge Base folder,
+three times what `INTEGER` holds, and `psycopg2.errors.NumericValueOutOfRange`
+aborted the transaction and ended the run.
+- **Impact:** one unwritable row ended a whole source's run, not just that file. The column is `BIGINT` from migration 0014, so this instance is closed, but the general shape remains: any database-level error on one file still aborts that source, because the failure comes from the transaction rather than from the file. Per-file guards cover downloads and ingestion, not the database.
+- **Mitigation in place:** migration 0014 widens the column, and `tests/database/test_migration_fidelity.py` now checks integer widths against the models as well as string widths — SQLite's INTEGER is 64-bit, so no SQLite test can see this class of bug. The size is stored whole; clamping it to fit would be a lie in the one column whose purpose is to report how big the unreadable thing was.
+- **Mitigation in place (second half):** the run is no longer left claiming `running`. `running` is committed before the work starts, so an exception escaping `sync_source` used to leave the row that way — and `db.rollback()` cannot undo a committed write, so the source refused every sync for the six hours `_is_stale` takes to forgive it. `_abandon` now releases it, records how far the run got, and leaves the delta token alone.
+- **Priority:** Low for the widening and the release (both done). Medium for the general case — a per-file `SAVEPOINT` would let the loop continue past a database error rather than ending the source, and has not earned its place until a second instance appears.
+
+### Legacy Office binaries are recognised and refused, not parsed
+`.doc`, `.xls`, `.ppt`, `.mmap`, `.msg`, `.vsd` and `.one` are listed in
+`KNOWN_UNSUPPORTED_EXTENSIONS` and rejected with the conversion that would fix
+them. Reading them properly needs a heavyweight dependency — `antiword`,
+`libreoffice`, `textract` — and half-reading one is worse than refusing it: a
+partial extraction of an OLE2 binary is a document of wrong characters that is
+then embedded, retrieved and cited as though it were the text.
+- **Impact:** a corpus with many legacy Office files has a real gap, visible as `unsupported` rows carrying the reason. `.xls` is the sharpest edge — `xlrd` still reads it and is not a dependency here.
+- **Mitigation in place:** each refusal names the conversion, so the list of rejects is a list of tasks. A synced file leaves a row, so the gap is countable rather than invisible; converting a file changes its `source_version` and the next run picks it up.
+- **Priority:** Medium — reconsider `xlrd` for `.xls` if the corpus turns out to hold many.
 
 ### Scanned documents are rejected, not OCR'd
 A PDF with no text layer yields no extractable text and is recorded as `failed`.

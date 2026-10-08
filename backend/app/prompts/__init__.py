@@ -7,6 +7,9 @@ from app.prompts.system import (
     EMAIL_TRANSFORM_PROMPT,
     EMAIL_TRIAGE_PROMPT,
     RAG_ANSWER_PROMPT,
+    REPORT_CROSS_PERIOD_PROMPT,
+    REPORT_PERIOD_SYNTHESIS_PROMPT,
+    REPORT_THREAD_ANALYSIS_PROMPT,
 )
 
 
@@ -21,6 +24,9 @@ def register_default_prompts() -> None:
         EMAIL_SUBJECT_PROMPT,
         EMAIL_TRIAGE_PROMPT,
         EMAIL_THREAD_SUMMARY_PROMPT,
+        REPORT_THREAD_ANALYSIS_PROMPT,
+        REPORT_PERIOD_SYNTHESIS_PROMPT,
+        REPORT_CROSS_PERIOD_PROMPT,
     )
 
     for prompt in default_prompts:

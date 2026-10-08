@@ -12,11 +12,11 @@ export type IsoDateTime = string;
 
 /** `backend/app/models/document.py::DocumentStatus` */
 export type DocumentStatus =
-  "pending" | "processing" | "indexed" | "failed" | "unsupported";
+  "pending" | "processing" | "indexed" | "failed" | "unsupported" | "ocr_required";
 
 /** `backend/app/models/document.py::IngestionResult` */
 export type IngestionResult =
-  "indexed" | "unchanged" | "replaced" | "failed" | "unsupported";
+  "indexed" | "unchanged" | "replaced" | "failed" | "unsupported" | "ocr_required";
 
 /** `backend/app/models/digital_twin.py::MemoryType` */
 export type MemoryType = "fact" | "preference" | "decision" | "commitment" | "context";
@@ -220,6 +220,7 @@ export interface SyncSourceState {
   last_unchanged: number;
   last_deleted: number;
   last_unsupported: number;
+  last_ocr_required: number;
   last_failed: number;
 }
 
@@ -243,6 +244,7 @@ export interface SyncSourceSummary {
   replaced: number;
   deleted: number;
   unsupported: number;
+  ocr_required: number;
   failed: number;
   duration_seconds: number;
   delta_advanced: boolean;
@@ -264,6 +266,7 @@ export interface SyncRunResponse {
   total_unchanged: number;
   total_deleted: number;
   total_unsupported: number;
+  total_ocr_required: number;
   total_failed: number;
   duration_seconds: number;
 }
@@ -722,6 +725,34 @@ export interface WeeklyReport {
   events_needing_answer: CalendarEvent[];
 }
 
+/**
+ * Whether this person's real calendar can be read, and why not.
+ *
+ * `connected` is about consent — Graph answered. `has_imported_events` is
+ * about rows — meetings have actually arrived. Both can be true, and consent
+ * with nothing imported yet is a normal state rather than a fault.
+ */
+export interface CalendarStatus {
+  configured: boolean;
+  connected: boolean;
+  mailbox: string | null;
+  detail: string;
+  has_imported_events: boolean;
+}
+
+/** What one import did, counted in rows rather than described in prose. */
+export interface CalendarImport {
+  mailbox: string;
+  since: string;
+  until: string;
+  created: number;
+  updated: number;
+  unchanged: number;
+  /** A subset of the occurrences seen, not a fourth category. */
+  cancelled: number;
+  total: number;
+}
+
 /** What deleting a user would remove. Read before the confirmation. */
 export interface UserDeletionPreview {
   user_id: Uuid;
@@ -753,10 +784,7 @@ export interface UserDeletionResult {
 // stored snapshot was written by whatever build produced it, and a narrower
 // type would make an older row unreadable rather than merely sparse.
 
-export type ReportType =
-  | "weekly_work"
-  | "weekly_email_digest"
-  | "monthly_email_digest";
+export type ReportType = "weekly_work" | "weekly_email_digest" | "monthly_email_digest";
 
 /** `complete` — produced from real data. `unavailable` — could not be
  * produced, with `detail` saying why. Never zero-filled. */
@@ -872,4 +900,77 @@ export interface MailboxUpdate {
   address: string;
   provider?: string | null;
   display_name?: string | null;
+}
+
+/**
+ * A detailed activity report, generated live rather than read from a snapshot.
+ *
+ * Deliberately not a `ReportEnvelope`. An envelope carries a stored report and
+ * its provenance — `is_provisional`, `from_history` — because a digest is a
+ * document written when its period closed. This one is computed on request
+ * from correspondence and is never stored, so the fields that matter are the
+ * ones saying what it was built from: how much of the mailbox was substantive,
+ * whether a model contributed, and whether the quality check passed. Forcing
+ * it into the envelope shape would mean inventing values for three fields that
+ * have no meaning here.
+ *
+ * Mirrors `ActivityReportResponse` in `backend/app/schemas/report_schema.py`.
+ */
+export type ActivityReportSource = "stored" | "revalidated" | "generated";
+
+/**
+ * Somebody is already building this exact report.
+ *
+ * The backend answers `202` with this rather than starting a second pipeline,
+ * and rather than leaving the caller on an open connection for minutes.
+ */
+export interface ActivityReportPending {
+  state: "generating";
+  period: ReportPeriod;
+  period_label: string;
+  started_at: IsoDateTime;
+  elapsed_seconds: number;
+  detail: string;
+}
+
+export interface ActivityReport {
+  state: "report";
+  /**
+   * Where this reply came from. `stored` and `revalidated` both mean the
+   * document was not rebuilt — the second says the mailbox was re-read and
+   * held nothing new — and `generated` means it was built for this request.
+   */
+  source: ActivityReportSource;
+  report_version: string;
+  /** True when the window was still open when the report was generated. */
+  is_provisional: boolean;
+  /** When the document was produced. Not when it was last confirmed current. */
+  generated_at: IsoDateTime;
+  /** When the evidence behind it was last confirmed current, if ever. */
+  checked_at: IsoDateTime | null;
+  /** The instant the correspondence behind it runs to. */
+  data_through: IsoDateTime | null;
+
+  period: ReportPeriod;
+  period_label: string;
+  /** True when the window stops short of the calendar period it sits in. */
+  is_partial: boolean;
+
+  title: string;
+  /** The report itself. Rendered by `ActivityReportDocument`. */
+  markdown: string;
+
+  word_count: number;
+  sections: string[];
+  workstream_count: number;
+  thread_count: number;
+  messages_analysed: number;
+  substantive_threads: number;
+  routine_threads: number;
+
+  /** False means conversations were described structurally, not by content. */
+  narrative: boolean;
+  quality_ok: boolean;
+  quality_notes: string[];
+  limitations: string[];
 }

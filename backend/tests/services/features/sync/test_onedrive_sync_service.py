@@ -449,7 +449,20 @@ def test_the_files_that_did_land_are_kept_after_a_partial_run(
 
     sync_source(db_session, client, SOURCE)
 
-    assert len(_documents(db_session)) == 1
+    from app.models.document import DocumentStatus
+
+    by_name = {document.filename: document for document in _documents(db_session)}
+
+    # The file that landed is indexed and stays indexed.
+    assert by_name["a.txt"].status is DocumentStatus.INDEXED
+
+    # The one that did not now leaves a row of its own, which it did not before.
+    # A run reporting "487 failed" and nothing else cannot be acted on; a row
+    # carrying the filename, type, size and Graph's reason makes "which files,
+    # and why" an ordinary query.
+    assert by_name["gone.txt"].status is DocumentStatus.FAILED
+    assert "500" in (by_name["gone.txt"].error_message or "")
+    assert by_name["gone.txt"].content_hash is None
 
 
 def test_a_parse_failure_does_not_hold_the_token_back(db_session: Session) -> None:

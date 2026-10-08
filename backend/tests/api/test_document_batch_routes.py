@@ -108,7 +108,10 @@ def test_a_failure_does_not_take_down_the_rest_of_the_batch(
             _file("a.pdf", build_pdf(["Readable."]), PDF_TYPE),
             _file("b.docx", build_docx([("H", "Also readable.")]), DOCX_TYPE),
             _file("c.pdf", b"not a pdf at all", PDF_TYPE),
-            _file("d.xlsx", b"spreadsheet bytes", "application/vnd.ms-excel"),
+            # A format this application recognises and deliberately refuses.
+            # `.xlsx` used to sit here and is now parsed, which is the point of
+            # keeping a genuinely unsupported entry in the mixed batch.
+            _file("d.mmap", b"mind map bytes", "application/octet-stream"),
             _file("e.txt", build_text("Readable too."), TEXT_TYPE),
         ],
     )
@@ -119,7 +122,7 @@ def test_a_failure_does_not_take_down_the_rest_of_the_batch(
     assert items["a.pdf"]["result"] == "indexed"
     assert items["b.docx"]["result"] == "indexed"
     assert items["c.pdf"]["result"] == "failed"
-    assert items["d.xlsx"]["result"] == "unsupported"
+    assert items["d.mmap"]["result"] == "unsupported"
     assert items["e.txt"]["result"] == "indexed"
 
     assert response.json()["succeeded"] == 3
@@ -153,7 +156,9 @@ def test_an_unsupported_file_reports_why(client: TestClient) -> None:
     assert item["result"] == "unsupported"
     assert item["succeeded"] is False
     assert item["document_id"] is None
-    assert "Unsupported document type" in item["reason"]
+    # The remedy, not just the refusal. "Unsupported document type: .doc" gives
+    # somebody nothing to do; naming the conversion gives them the whole task.
+    assert ".docx" in item["reason"]
 
 
 def test_a_parser_failure_reports_a_document_to_inspect(client: TestClient) -> None:
