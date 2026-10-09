@@ -10,6 +10,11 @@ python-dotenv
 
 # Database
 sqlalchemy
+# Psycopg 3: SQLAlchemy 2.1 maps a bare postgresql:// URL (the form Render's
+# DATABASE_URL takes) to this driver rather than to psycopg2.
+psycopg[binary]>=3.2,<4
+# psycopg2 still serves URLs that name it, e.g. the local default
+# postgresql+psycopg2://... in settings.py and .env.example.
 psycopg2-binary
 alembic
 pgvector
