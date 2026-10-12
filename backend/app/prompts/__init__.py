@@ -10,6 +10,7 @@ from app.prompts.system import (
     REPORT_CROSS_PERIOD_PROMPT,
     REPORT_PERIOD_SYNTHESIS_PROMPT,
     REPORT_THREAD_ANALYSIS_PROMPT,
+    TWIN_CONVERSATION_PROMPT,
 )
 
 
@@ -19,6 +20,7 @@ def register_default_prompts() -> None:
     default_prompts = (
         ASSISTANT_PROMPT,
         RAG_ANSWER_PROMPT,
+        TWIN_CONVERSATION_PROMPT,
         EMAIL_COMPOSE_PROMPT,
         EMAIL_TRANSFORM_PROMPT,
         EMAIL_SUBJECT_PROMPT,

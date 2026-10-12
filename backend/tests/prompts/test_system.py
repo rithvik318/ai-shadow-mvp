@@ -18,6 +18,7 @@ EXPECTED_PROMPT_NAMES = [
     "report_cross_period",
     "report_period_synthesis",
     "report_thread_analysis",
+    "twin_conversation",
 ]
 
 

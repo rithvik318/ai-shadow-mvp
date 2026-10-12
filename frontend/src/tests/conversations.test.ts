@@ -14,6 +14,7 @@ import {
   deserialise,
   groupConversations,
   groupFor,
+  isNoMatch,
   renameConversation,
   serialise,
   startConversation,
@@ -212,5 +213,37 @@ describe("persistence", () => {
 
   it("drops entries that are not conversations", () => {
     assert.deepEqual(deserialise('[{"id":"x"},{"nope":1}]'), []);
+  });
+});
+
+describe("the no-match note", () => {
+  // A greeting answered from the Digital Twin profile has zero retrieved
+  // chunks because nothing was searched. Production showed "Nothing in the
+  // knowledge base matched" under "Hi"; only a document question that found
+  // nothing should carry it.
+  const assistant = (extra: Partial<ChatMessage>): ChatMessage => ({
+    id: "a",
+    role: "assistant",
+    text: "reply",
+    retrievedChunks: 0,
+    ...extra,
+  });
+
+  it("is shown for a document question nothing matched", () => {
+    assert.equal(isNoMatch(assistant({ answerBasis: "no_match" })), true);
+  });
+
+  it("is not shown for a greeting or a profile answer", () => {
+    assert.equal(isNoMatch(assistant({ answerBasis: "conversation" })), false);
+    assert.equal(isNoMatch(assistant({ answerBasis: "profile" })), false);
+  });
+
+  it("falls back to retrieved chunks for messages saved before answer_basis", () => {
+    assert.equal(isNoMatch(assistant({})), true);
+    assert.equal(isNoMatch(assistant({ retrievedChunks: 2 })), false);
+  });
+
+  it("is never shown under the user's own message", () => {
+    assert.equal(isNoMatch({ id: "u", role: "user", text: "Hi" }), false);
   });
 });

@@ -1,4 +1,5 @@
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -60,10 +61,17 @@ class ChatResponse(BaseModel):
     """A grounded answer, with the passages that were put in front of the
     model.
 
-    `retrieved_chunks == 0` means nothing in the knowledge base was relevant —
-    the answer says so, and no model call was made.
+    `answer_basis` says what the answer was drawn from: `documents` (cited
+    passages), `no_match` (a document question nothing in the knowledge base
+    answered — no model call was made), `conversation` (a greeting) or
+    `profile` (a question about the Digital Twin itself). The last two never
+    search the documents, so their `retrieved_chunks` is 0 without that meaning
+    "nothing matched".
     """
 
     answer: str
     sources: list[ChatSourceResponse]
     retrieved_chunks: int
+    answer_basis: Literal["documents", "no_match", "conversation", "profile"] = (
+        "documents"
+    )

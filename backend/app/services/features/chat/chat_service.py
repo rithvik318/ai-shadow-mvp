@@ -6,8 +6,15 @@ and sends the result to `LLMService`. It contains no retrieval logic, no
 similarity arithmetic, no prompt text and no provider knowledge — each of those
 belongs to the layer that already owns it, and this service composes them.
 
-Stateless by design. No conversation history is kept or consulted; every
-question is answered from the documents alone.
+Stateless by design. No conversation history is kept or consulted.
+
+**Not every message is a document question.** A greeting, or a question to the
+twin about itself, is recognised by `intent.classify` before retrieval and
+answered from the Digital Twin profile and memories through the
+`twin_conversation` prompt — with no sources, because the profile is never a
+source. Everything else goes through retrieval exactly as before, and an empty
+result is still the fixed `NO_CONTEXT_ANSWER`. Without this split an empty
+knowledge base answered "Hi" with "nothing in your documents".
 
 **Sources come from retrieval, not from the model.** The passages returned in
 `sources` are the chunks that were actually fetched and put in front of the
@@ -19,6 +26,7 @@ index and the `AnalysisEngine` to validate those indices; see
 docs/DECISIONS.md.
 """
 
+import enum
 import logging
 import time
 import uuid
@@ -32,6 +40,7 @@ from app.core.exceptions import EmptyQueryError
 from app.prompts.builder import PromptBuilder
 from app.prompts.registry import PromptRegistry
 from app.services.features.chat.context_service import build_context
+from app.services.features.chat.intent import Intent, classify
 from app.services.features.digital_twin import memory_service, profile_service
 from app.services.features.digital_twin.persona_service import (
     KNOWLEDGE_HEADING,
@@ -45,6 +54,7 @@ from app.services.llm.llm_service import llm_service
 logger = logging.getLogger(__name__)
 
 RAG_PROMPT_NAME = "rag_answer"
+TWIN_PROMPT_NAME = "twin_conversation"
 
 # Returned instead of calling the model when retrieval found nothing. Asking a
 # model to answer with no context invites exactly the invention the prompt
@@ -52,6 +62,29 @@ RAG_PROMPT_NAME = "rag_answer"
 NO_CONTEXT_ANSWER = (
     "I could not find anything in your documents that answers that question."
 )
+
+# Returned instead of calling the model when asked about the twin and the twin
+# has nothing to say about itself. With no profile, any self-description the
+# model produced would be invented.
+NO_PROFILE_ANSWER = (
+    "This Digital Twin has no profile yet, so I can't describe who I represent. "
+    "Add one on the Profile tab, or ask me about the documents in the knowledge "
+    "base."
+)
+
+
+class AnswerBasis(enum.StrEnum):
+    """What an answer was drawn from — so a client never has to infer it.
+
+    `retrieved_chunks == 0` alone cannot tell "nothing matched" apart from "this
+    was a greeting and nothing was searched", and the UI showed the no-match note
+    under both.
+    """
+
+    DOCUMENTS = "documents"
+    NO_MATCH = "no_match"
+    CONVERSATION = "conversation"
+    PROFILE = "profile"
 
 
 @dataclass(frozen=True)
@@ -73,6 +106,7 @@ class ChatAnswer:
     answer: str
     sources: list[ChatSource]
     retrieved_chunks: int
+    basis: AnswerBasis = AnswerBasis.DOCUMENTS
 
 
 def _compose(persona: str, knowledge: str) -> str:
@@ -104,6 +138,55 @@ def _persona_for(db: Session, twin_user_id: uuid.UUID | None) -> PersonaContext:
     )
 
 
+def _answer_conversationally(
+    db: Session, message: str, intent: Intent, twin_user_id: uuid.UUID | None
+) -> ChatAnswer:
+    """Reply to a greeting or a question about the twin, from the persona alone.
+
+    No retrieval and no sources: nothing here is evidence about the documents,
+    so nothing may be presented as a citation.
+    """
+
+    persona = _persona_for(db, twin_user_id)
+    basis = (
+        AnswerBasis.PROFILE if intent is Intent.ABOUT_TWIN else AnswerBasis.CONVERSATION
+    )
+
+    if intent is Intent.ABOUT_TWIN and persona.is_empty:
+        logger.info(
+            "chat_answered_without_profile",
+            extra={"twin_user_id": str(twin_user_id) if twin_user_id else None},
+        )
+        return ChatAnswer(
+            answer=NO_PROFILE_ANSWER, sources=[], retrieved_chunks=0, basis=basis
+        )
+
+    messages = PromptBuilder.build(
+        PromptRegistry.get(TWIN_PROMPT_NAME),
+        persona=persona.text or "(no profile or memories recorded)",
+        message=message,
+    )
+
+    started = time.perf_counter()
+    answer = llm_service.complete(messages)
+    llm_ms = (time.perf_counter() - started) * 1000
+
+    logger.info(
+        "chat_answered_conversationally",
+        extra={
+            "intent": intent.value,
+            "twin_user_id": str(twin_user_id) if twin_user_id else None,
+            "persona_chars": len(persona.text),
+            "llm_duration_ms": round(llm_ms, 2),
+            "answer_length": len(answer),
+        },
+    )
+
+    return ChatAnswer(
+        answer=answer.strip(), sources=[], retrieved_chunks=0, basis=basis
+    )
+
+
 def answer_question(
     db: Session,
     question: str,
@@ -126,6 +209,9 @@ def answer_question(
     means "use whichever profile is lying around" — there is no such profile to
     find, because every lookup below is scoped to an explicit id.
 
+    A greeting or a question about the twin itself (`intent.classify`) is
+    answered from the persona alone, without retrieval and without sources.
+
     Returns `NO_CONTEXT_ANSWER` with no sources when retrieval finds nothing,
     rather than raising: an empty knowledge base is a normal state, and the
     honest response to it is an answer, not an error.
@@ -137,6 +223,10 @@ def answer_question(
 
     if not question or not question.strip():
         raise EmptyQueryError("Question cannot be empty.")
+
+    intent = classify(question)
+    if intent is not Intent.DOCUMENTS:
+        return _answer_conversationally(db, question.strip(), intent, twin_user_id)
 
     chunks = retrieval_service.search(
         db,
@@ -151,7 +241,12 @@ def answer_question(
             "chat_answered_without_context",
             extra={"user_id": user_id, "retrieved_chunks": 0},
         )
-        return ChatAnswer(answer=NO_CONTEXT_ANSWER, sources=[], retrieved_chunks=0)
+        return ChatAnswer(
+            answer=NO_CONTEXT_ANSWER,
+            sources=[],
+            retrieved_chunks=0,
+            basis=AnswerBasis.NO_MATCH,
+        )
 
     # Loaded only once retrieval has found something: with nothing to answer
     # from, the reply is fixed and neither the profile nor the memories change

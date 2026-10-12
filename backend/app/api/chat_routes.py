@@ -13,7 +13,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 @router.post(
     "",
     response_model=ChatResponse,
-    summary="Ask a question about your documents",
+    summary="Ask your documents, or talk to the Digital Twin",
     responses={
         401: {"model": ErrorResponse, "description": "No X-User-ID header"},
         404: {"model": ErrorResponse, "description": "Unknown user"},
@@ -43,9 +43,12 @@ def ask(
 
     Stateless: no conversation history is kept or consulted.
 
-    An empty or irrelevant knowledge base is answered, not raised — the reply
-    says nothing was found and `retrieved_chunks` is 0. Provider failures
-    return 502 so they are never mistaken for that case.
+    A greeting or a question about the twin itself is answered from the
+    profile and memories, with no sources and `answer_basis` of `conversation`
+    or `profile`. A document question that the knowledge base cannot answer is
+    answered, not raised — the reply says nothing was found and `answer_basis`
+    is `no_match`. Provider failures return 502 so they are never mistaken for
+    that case.
     """
 
     answer = chat_service.answer_question(
@@ -66,4 +69,5 @@ def ask(
             for source in answer.sources
         ],
         retrieved_chunks=answer.retrieved_chunks,
+        answer_basis=answer.basis.value,
     )

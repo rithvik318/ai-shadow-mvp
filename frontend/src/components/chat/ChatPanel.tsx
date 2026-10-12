@@ -10,7 +10,11 @@ import {
 import * as api from "../../api";
 import { ApiError } from "../../api/client";
 import { useTwins } from "../../state/TwinContext";
-import type { ChatMessage, Conversation } from "../../lib/conversations";
+import {
+  isNoMatch,
+  type ChatMessage,
+  type Conversation,
+} from "../../lib/conversations";
 import { Button, EmptyState, ErrorNotice, Spinner } from "../ui";
 import { SourceList } from "./SourceCard";
 import { UploadTray } from "./UploadTray";
@@ -69,6 +73,7 @@ export function ChatPanel({
           text: answer.answer,
           sources: answer.sources,
           retrievedChunks: answer.retrieved_chunks,
+          answerBasis: answer.answer_basis,
         },
       ]);
     } catch (cause) {
@@ -234,7 +239,7 @@ function Message({ message }: { message: ChatMessage }) {
       </div>
       {message.sources && message.sources.length > 0 ? (
         <SourceList sources={message.sources} />
-      ) : message.retrievedChunks === 0 ? (
+      ) : isNoMatch(message) ? (
         <p className="mt-2 text-xs text-ink-500">
           Nothing in the knowledge base matched this question.
         </p>

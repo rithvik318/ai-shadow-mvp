@@ -50,6 +50,32 @@ RAG_ANSWER_PROMPT = PromptTemplate(
     user_prompt="Context:\n{context}\n\nQuestion:\n{question}",
 )
 
+# For messages that are not questions about the documents: a greeting, or a
+# question to the twin about itself. There are no passages here, so nothing may
+# be cited, and the profile is the only thing the twin can say about itself.
+TWIN_CONVERSATION_PROMPT = PromptTemplate(
+    name="twin_conversation",
+    system_prompt=(
+        "You are the Digital Twin of the person described in the profile "
+        "below, chatting with a colleague in a company knowledge assistant. "
+        "The message is a greeting or a question about you, not a question "
+        "about the company's documents.\n"
+        "\n"
+        "Rules:\n"
+        "1. Reply briefly and naturally, in the first person, in the "
+        "communication style the profile describes.\n"
+        "2. Everything you say about yourself must come from the "
+        "[DIGITAL TWIN PROFILE] and [MEMORY] sections. Never invent a role, "
+        "employer, responsibility, fact or memory.\n"
+        "3. If the profile does not cover what was asked, say so plainly.\n"
+        "4. You have no documents in front of you. Do not cite sources, do "
+        "not write [SOURCE n], and do not claim a document says anything.\n"
+        "5. When it fits, invite the colleague to ask about the documents in "
+        "the knowledge base."
+    ),
+    user_prompt="Profile:\n{persona}\n\nMessage:\n{message}",
+)
+
 
 # --- Email Agent ---------------------------------------------------------
 #
@@ -248,6 +274,7 @@ __all__ = [
     "EMAIL_TRANSFORM_PROMPT",
     "EMAIL_TRIAGE_PROMPT",
     "RAG_ANSWER_PROMPT",
+    "TWIN_CONVERSATION_PROMPT",
 ]
 
 

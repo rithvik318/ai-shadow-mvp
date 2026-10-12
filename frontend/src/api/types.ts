@@ -116,10 +116,14 @@ export interface ChatSource {
   chunk_id: Uuid;
 }
 
+/** What an answer was drawn from; see `ChatResponse` in chat_schema.py. */
+export type AnswerBasis = "documents" | "no_match" | "conversation" | "profile";
+
 export interface ChatResponse {
   answer: string;
   sources: ChatSource[];
   retrieved_chunks: number;
+  answer_basis: AnswerBasis;
 }
 
 export interface SearchResult extends ChatSource {

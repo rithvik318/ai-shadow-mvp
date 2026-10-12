@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import EmbeddingError, LLMServiceError
 from app.models.document import Document, DocumentChunk, DocumentStatus
+from app.models.user import User
 from app.services.features.chat.chat_service import NO_CONTEXT_ANSWER
+from app.services.features.digital_twin.profile_service import upsert_profile
 from app.services.llm.embedding_service import embedding_service
 from app.services.llm.llm_service import llm_service
 
@@ -136,6 +138,7 @@ def test_an_empty_knowledge_base_returns_200_with_no_sources(
     assert body["answer"] == NO_CONTEXT_ANSWER
     assert body["sources"] == []
     assert body["retrieved_chunks"] == 0
+    assert body["answer_basis"] == "no_match"
     assert calls == []
 
 
@@ -296,3 +299,103 @@ def test_the_endpoint_is_stateless(
     assert len(calls) == 2
     assert len(calls[0]) == len(calls[1]) == 2
     assert "first question" not in calls[1][1]["content"]
+
+
+# --- conversational messages (production regression) ----------------------
+#
+# With zero documents, "Hi" and "introduce yourself" both returned the
+# knowledge-base no-match reply, and the UI added "Nothing in the knowledge
+# base matched this question." underneath.
+
+
+def test_a_greeting_with_an_empty_knowledge_base_gets_a_conversational_reply(
+    client: TestClient, user_headers: dict[str, str], fake_llm
+) -> None:
+    fake_llm("Hello! How can I help today?")
+
+    response = client.post("/chat", json={"question": "Hi"}, headers=user_headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == "Hello! How can I help today?"
+    assert body["answer_basis"] == "conversation"
+    assert body["sources"] == []
+    assert body["retrieved_chunks"] == 0
+
+
+def test_introduce_yourself_uses_the_selected_twins_profile(
+    client: TestClient,
+    user_headers: dict[str, str],
+    test_user: User,
+    db_session: Session,
+    fake_llm,
+) -> None:
+    calls = fake_llm("I'm Azmat, a recruiter at SunRadia.")
+    upsert_profile(
+        db_session,
+        {"name": "Azmat Shaik", "role": "Recruiter", "organization": "SunRadia"},
+        user_id=test_user.id,
+    )
+
+    body = client.post(
+        "/chat", json={"question": "Introduce yourself"}, headers=user_headers
+    ).json()
+
+    assert body["answer"] == "I'm Azmat, a recruiter at SunRadia."
+    assert body["answer_basis"] == "profile"
+    assert body["sources"] == []
+    assert "Role: Recruiter" in calls[0][1]["content"]
+
+
+def test_a_document_answer_reports_the_documents_basis(
+    client: TestClient,
+    user_headers: dict[str, str],
+    db_session: Session,
+    embed_query_as,
+    fake_llm,
+) -> None:
+    embed_query_as(EAST)
+    fake_llm("An answer.")
+    _seed(db_session, [("body", EAST)])
+
+    body = client.post(
+        "/chat", json={"question": "What does the policy say?"}, headers=user_headers
+    ).json()
+
+    assert body["answer_basis"] == "documents"
+
+
+def test_a_raw_provider_failure_on_a_greeting_is_a_502_not_a_500(
+    client: TestClient,
+    user_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The SDK's own exceptions used to escape every handler as a bare 500."""
+
+    import httpx
+    from openai import AuthenticationError
+
+    from app.services.llm import llm_service as llm_module
+
+    def raising_client():
+        request = httpx.Request("POST", "https://provider.invalid/v1/chat")
+        raise AuthenticationError(
+            "Incorrect API key provided: sk-secret-value",
+            response=httpx.Response(401, request=request),
+            body=None,
+        )
+
+    monkeypatch.setattr(llm_module, "get_llm_client", raising_client)
+
+    with caplog.at_level("WARNING"):
+        response = client.post("/chat", json={"question": "Hi"}, headers=user_headers)
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "The language model provider is unavailable.",
+        "error": "LLMServiceError",
+    }
+    assert "llm_call_failed error=AuthenticationError status=401" in caplog.text
+    assert "sk-secret-value" not in caplog.text
+    assert "sk-secret-value" not in response.text

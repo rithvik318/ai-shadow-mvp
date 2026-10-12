@@ -8,7 +8,7 @@
  * what lets the rules below be tested without a browser.
  */
 
-import type { ChatSource } from "../api/types";
+import type { AnswerBasis, ChatSource } from "../api/types";
 
 export interface ChatMessage {
   id: string;
@@ -16,6 +16,21 @@ export interface ChatMessage {
   text: string;
   sources?: ChatSource[];
   retrievedChunks?: number;
+  answerBasis?: AnswerBasis;
+}
+
+/**
+ * Whether to show "Nothing in the knowledge base matched" under an answer.
+ *
+ * Only for a document question that found nothing. A greeting or a question
+ * about the twin also has zero retrieved chunks, because nothing was searched,
+ * and saying nothing matched would be wrong. Messages saved before the backend
+ * reported `answerBasis` fall back to the old rule.
+ */
+export function isNoMatch(message: ChatMessage): boolean {
+  if (message.role !== "assistant") return false;
+  if (message.answerBasis !== undefined) return message.answerBasis === "no_match";
+  return message.retrievedChunks === 0;
 }
 
 export interface Conversation {
