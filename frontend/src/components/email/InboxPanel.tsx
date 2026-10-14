@@ -28,6 +28,21 @@ import { Badge, Button, EmptyState, ErrorNotice, Spinner } from "../ui";
  * about. An untriaged row says "Not yet triaged", which is different from
  * "unimportant" and is shown as such.
  */
+/** Convert email HTML to readable, bounded text for reply generation. */
+function getReplyContext(body: string | null | undefined, snippet?: string | null): string {
+  const source = body?.trim() || snippet?.trim() || "";
+  if (!source) return "";
+
+  const plainText = /<\/?[a-z][\s\S]*>/i.test(source)
+    ? (() => {
+        const document = new DOMParser().parseFromString(source, "text/html");
+        document.querySelectorAll("script, style, head, title").forEach((node) => node.remove());
+        return document.body.textContent ?? "";
+      })()
+    : source;
+
+  return plainText.replace(/\s+/g, " ").trim().slice(0, 30000);
+}
 interface Props {
   userId: string;
   provider: EmailProviderStatus | null;
@@ -129,7 +144,7 @@ export function InboxPanel({ userId, provider, onReply }: Props) {
         operation: "reply",
         instruction: "Write a reply to this message.",
         source_subject: full.subject,
-        source_body: full.body ?? full.snippet,
+        source_body: getReplyContext(full.body, full.snippet),
         source_sender: full.sender?.address ?? null,
         use_knowledge_base: true,
       });
