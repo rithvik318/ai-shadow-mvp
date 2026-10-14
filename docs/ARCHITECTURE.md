@@ -1,14 +1,24 @@
 # AI Shadow MVP — Architecture
 
-**Scope note.** This document describes the system being built, and stays close to what exists. Where it describes something not yet implemented it is marked *(planned)*. [`FEATURES.md`](FEATURES.md) is the authoritative record of what exists today; where the two disagree, `FEATURES.md` wins.
+**Scope note.** This document describes the deployed system. Where it describes something not yet implemented it is marked *(planned)*. [`FEATURES.md`](FEATURES.md) is the authoritative record of what exists today; where the two disagree, `FEATURES.md` wins.
 
 ---
 
 ## 1. What this system does
 
-Users upload documents. The documents are indexed. Users ask questions and get answers grounded in those documents, with citations back to a specific page or section.
+Users upload documents. The documents are indexed. Users ask questions and get answers grounded in those documents, with citations back to a specific page or section. A per-person Digital Twin (profile and memories) shapes how answers and emails are written, and around that core sit OneDrive synchronisation, an approval-gated Email Agent, tasks, activity reports and manual calendar import.
 
-That sentence is the whole product for now. The reference `ai-shadow` repository describes a considerably larger system — an AI Orchestrator mediating memory, knowledge and a six-tool action layer. None of it is needed here, and none of it is built. See [`DECISIONS.md`](DECISIONS.md).
+```
+Browser ──▶ Vercel (static SPA, /api/* rewrite + x-origin-secret)
+                │
+                ▼
+           Render: FastAPI (uvicorn)  ──▶ OpenRouter (completions, embeddings)
+                │                     ──▶ Microsoft Graph (OneDrive, mail, calendar)
+                ▼
+           Neon PostgreSQL + pgvector (Alembic migrations 0001–0016)
+```
+
+The core sentence above is still the product's centre. The reference `ai-shadow` repository describes a considerably larger system — an AI Orchestrator mediating memory, knowledge and a six-tool action layer. None of it is needed here, and none of it is built. See [`DECISIONS.md`](DECISIONS.md).
 
 ---
 
@@ -20,7 +30,9 @@ HTTP  ──▶  API layer            app/api/
              │
              ▼
            Feature services     app/services/features/
-                                product logic: documents/, retrieval/, chat/
+                                product logic: documents/, retrieval/, chat/,
+                                digital_twin/, email/, tasks/, calendar/,
+                                reports/, sync/, users/
              │
              ├──────────────▶   Engines            app/services/engines/
              │                  reusable, domain-agnostic AI capabilities
@@ -49,17 +61,19 @@ Two entry points, one pipeline. `POST /documents/upload` raises, and its errors
 become status codes; `POST /documents/batch-upload` reports the same work as a
 value per file, because a batch cannot use exceptions — the first bad file would
 end the run and the good files after it would never be attempted. Both call
-`ingestion_service`, and the later OneDrive synchronisation will call the same
-function with a `source_uri`. A second caller must not mean a second pipeline.
+`ingestion_service`, and OneDrive synchronisation calls the same function with a
+`source_uri`. A second caller must not mean a second pipeline.
 
 ```
 validate ──▶ identify ──▶ parse ──▶ chunk ──▶ embed ──▶ indexed
    │             │           │                  │
-   │             │           └── failed         └── failed (chunks kept
-   │             │                                   for the backfill)
+   │             │           ├── failed         └── failed (chunks kept
+   │             │           └── ocr_required        for the backfill)
+   │             │               (no text layer)
    │             └── unchanged: same bytes already indexed, nothing re-done
    │             └── replaced: known source, new bytes — old chunks dropped
    └── rejected before any row exists: empty, oversized, unsupported
+       (a synced file instead gets an `unsupported` row with the reason)
 ```
 
 Replacement drops the old chunks only *after* the new content has parsed and
@@ -80,8 +94,12 @@ POST /documents/upload
    parse_document()           bytes → sections with provenance
         │                     PDF   → one section per page, page_number set
         │                     DOCX  → one section per heading, section_title set
+        │                     PPTX  → one section per slide (number in page_number)
+        │                     XLSX  → one section per sheet, rows as "Header: value"
+        │                     HTML  → sections by heading; script/style dropped
         │                     MD    → one section per ATX heading
         │                     TXT   → a single untitled section
+        │                     ─ no text layer: status=ocr_required, 422
         │                     ─ failure: status=failed + error_message, 422
         ▼
    chunk_document()           each section split independently, so a chunk
@@ -311,16 +329,21 @@ their provenance; assembling those into an answer is the next layer's job.
 ## 6. Chat
 
 ```
-POST /chat  { question, top_k? }
+POST /chat  { question, top_k? }   + X-User-ID
    │
    ▼
 ChatRequest validation                      blank question → 422
    │
    ▼
+intent.classify(question)                   no model call
+   │
+   ├── greeting / about the twin ──▶ persona only, "twin_conversation" prompt,
+   │                                 no sources, answer_basis: conversation | profile
+   ▼
 retrieval_service.search(question, top_k)   §5
    │
    ├── no passages ──▶ 200, fixed "nothing found" answer,
-   │                   retrieved_chunks: 0, model NOT called
+   │                   answer_basis: no_match, model NOT called
    ▼
 PromptBuilder.build(registry["rag_answer"],
                     context=numbered passages, question=...)
@@ -329,7 +352,7 @@ PromptBuilder.build(registry["rag_answer"],
 llm_service.complete(messages)              provider failure → 502
    │
    ▼
-{ answer, sources[], retrieved_chunks }
+{ answer, sources[], retrieved_chunks, answer_basis: documents }
 ```
 
 `ChatService` is orchestration and nothing else: no similarity arithmetic, no
@@ -349,8 +372,8 @@ placed *above* the numbered passages, under `[DIGITAL TWIN PROFILE]` and
 no profile and no memories the assembled context is byte-for-byte what it was
 before the feature existed.
 
-Stateless. No conversation history is stored or consulted; each question is
-answered from the documents alone.
+Stateless. No conversation history is stored or consulted; the frontend keeps
+transcripts in browser storage for display only.
 
 ---
 
@@ -425,21 +448,26 @@ Services raise domain exceptions from `app/core/exceptions.py`. They know nothin
 | `EmptyDocumentError`, `DocumentParseError` | 422 |
 | any other `DocumentError` | 400 |
 | `RetrievalError`, `EmptyQueryError` | 422 |
+| `NoTextLayerError` | 422 |
 | `AnalysisValidationError`, `LLMServiceError`, `EmbeddingError` | 502 |
 
-Every mapped error returns `{"detail": "...", "error": "ExceptionClassName"}`.
+Email, task, calendar, Digital Twin, identity, sync and report errors have their
+own tables in `app/main.py` (for example `EmailProviderNotConfiguredError` → 409,
+`EmailProviderAuthError` → 502, `EmailDraftNotApprovedError` → 409). Every mapped
+error returns `{"detail": "...", "error": "ExceptionClassName"}`. The
+`ORIGIN_SECRET` middleware answers `403 OriginNotAllowed` before any route runs.
 
 ---
 
 ## 8. Configuration
 
-All settings come from environment variables through `app/config/settings.py`, and every one has a working default so the package imports without a `.env`. Nothing reads `os.environ` directly.
+All settings come from environment variables through `app/config/settings.py`, and every one has a working default so the package imports without a `.env`. Nothing reads `os.environ` directly. The template is the root `.env.example`; deployment values are set in Render and Vercel (see the README's deployment guide).
 
 ---
 
 ## 9. Testing
 
-The test tree mirrors the application tree. Tests run against in-memory SQLite with no services and no credentials: the embedding column is declared with a JSON variant for SQLite, so the same models create cleanly in both dialects.
+The test tree mirrors the application tree. Tests run against in-memory SQLite with no services and no credentials: the embedding column is declared with a JSON variant for SQLite, so the same models create cleanly in both dialects. `backend/conftest.py` resets every setting so `.env` never reaches a test, and refuses any non-loopback network connection. Tests marked `postgres` run against a live PostgreSQL when one is reachable (migration fidelity, pgvector retrieval).
 
 Parsing and chunking are tested as pure functions over generated fixture documents — a hand-built multi-page PDF, a DOCX with headings, Markdown and plain text — rather than through the ORM. Ingestion is tested against a real in-memory database including the cascade delete. The HTTP surface is tested through `TestClient`, covering each supported format, each rejection path and its status code, pagination, filtering and deletion.
 
@@ -479,11 +507,14 @@ The Analysis Engine already does the hard part: it forces the model's output thr
 | API | FastAPI |
 | Validation & settings | Pydantic, Pydantic Settings |
 | Database | PostgreSQL with pgvector |
-| ORM & migrations | SQLAlchemy 2.0, Alembic |
-| Parsing | pypdf, python-docx |
+| ORM & migrations | SQLAlchemy 2, Alembic; psycopg 3 and psycopg2 drivers |
+| Parsing | pypdf, python-docx, python-pptx, openpyxl, stdlib HTML parser |
 | Chunking | langchain-text-splitters |
 | LLM | OpenAI SDK against OpenAI or OpenRouter |
 | Embeddings | Same SDK; provider selectable independently of completions |
 | Testing | pytest, SQLite in-memory |
 | Lint & format | ruff |
-| Frontend *(planned)* | React, Tailwind |
+| Microsoft Graph | httpx client, client-credentials auth |
+| Reports export | python-docx |
+| Frontend | React 18, TypeScript, Vite, Tailwind |
+| Hosting | Vercel (frontend), Render (backend), Neon (PostgreSQL) |

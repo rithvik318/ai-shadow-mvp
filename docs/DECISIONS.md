@@ -94,7 +94,7 @@ Why the codebase is shaped the way it is. Entries are chronological, oldest firs
 - **Context:** Authentication is not on the MVP path, but documents are user data from the first upload.
 - **Rationale:** Adding scoping later means a migration, a backfill, and an audit of every query written in the meantime. Adding it now costs a column and a filter. The denormalisation on chunks keeps retrieval — which filters by owner on every search — off a join.
 - **Consequences:** Introducing authentication becomes a change to where `user_id` comes from. Until then the system is single-tenant and unauthenticated, recorded in `KNOWN_ISSUES.md`.
-- **Status:** Accepted — in effect.
+- **Status:** Accepted — refined. The company corpus stays under the shared `MVP_USER_ID` by design; per-person data (Digital Twin, email, tasks, reports) is keyed to `users` by UUID and filtered by `X-User-ID`.
 
 ---
 
@@ -114,7 +114,7 @@ Why the codebase is shaped the way it is. Entries are chronological, oldest firs
 - **Decision:** Uploads rejected for size, type or emptiness leave no row. Files that pass validation but fail to parse are persisted with `status="failed"` and an `error_message`, then the error is re-raised.
 - **Rationale:** A rejected upload is a client mistake with an immediate, self-explanatory response; storing it would be noise. A parse failure is something the user needs to see afterwards — "why is my scanned PDF not searchable" is answerable only if the failure is recorded.
 - **Consequences:** `GET /documents?status=failed` is the diagnostic surface. The upload response is still an error, so clients cannot mistake a failed ingest for a successful one.
-- **Status:** Accepted — in effect.
+- **Status:** Accepted — refined. Synchronised files that are unsupported or oversized now leave an `unsupported` row (so a sync can stop re-offering them), and documents with no text layer are recorded `ocr_required` rather than `failed`.
 
 ---
 
@@ -332,7 +332,51 @@ Why the codebase is shaped the way it is. Entries are chronological, oldest firs
 - **Decision:** OneDrive synchronisation stays on Microsoft Graph with an Entra application. No public/anonymous shared-link transport is built, and `PublicOneDriveSource` is not added.
 - **Context:** SunRadia supplied "anyone with the link" shared-folder URLs but not Graph credentials, and asked whether the ~786-document corpus could be synchronised from those links directly so ingestion need not wait on a tenant administrator.
 - **Rationale:** Microsoft documents the answer plainly. The Shares API is the supported way to reach a sharing link programmatically, and [its reference](https://learn.microsoft.com/en-us/graph/api/shares-get?view=graph-rest-1.0) states: *"For OneDrive for Business and SharePoint, the Shares API always requires authentication and can't be used to access anonymously shared content without a user context."* The permissions table lists only delegated and application permissions — there is no anonymous tier — and the `Authorization: Bearer {token}` header is marked Required. The browser can open these links because the OneDrive web application redeems the share for a scoped guest token through an internal, undocumented flow; reproducing that means reverse-engineering a private mechanism Microsoft is free to change without notice. That is the brittle scraper the milestone brief explicitly ruled out, and it would sit between us and the entire corpus.
-- **Consequences:** Ingestion of the corpus waits on an Entra app registration with `Files.Read.All` (plus `Sites.Read.All` if the folders live in a SharePoint library) and admin consent. The Graph implementation is already built and tested, so the wait costs time and no engineering. Manual and batch upload remain available for ad-hoc documents in the meantime. The source seam in `onedrive_sync_service` — `resolve_folder`, `iter_delta`, `download` — is the point where any alternative transport would attach if one ever becomes viable; nothing about this decision closes that door.
+- **Consequences:** Ingestion of the corpus waits on an Entra app registration with `Files.Read.All` and admin consent. (`Sites.Read.All` was later found unnecessary: as an application permission, `Files.Read.All` covers SharePoint libraries.) The Graph implementation is already built and tested, so the wait costs time and no engineering. Manual and batch upload remain available for ad-hoc documents in the meantime. The source seam in `onedrive_sync_service` — `resolve_folder`, `iter_delta`, `download` — is the point where any alternative transport would attach if one ever becomes viable; nothing about this decision closes that door.
+- **Status:** Accepted — in effect.
+
+---
+
+## Activity reports are stored per window and rebuilt only on request
+
+- **Date:** 2026-09-15
+- **Decision:** Persist detailed activity reports in `activity_report`, keyed on `(user_id, period_start, period_end, report_version)`. A closed window is served from storage; a running one is revalidated by a correspondence fingerprint after `ACTIVITY_REPORT_FRESH_SECONDS`; only `POST /reports/activity` (the Regenerate button) rebuilds. A `generating` row is the claim that prevents two concurrent generations (`202` for the second).
+- **Context:** The endpoint recomputed a minutes-long, model-heavy pipeline on every request, including for weeks that could no longer change.
+- **Rationale:** A finished period has one answer; storing it turns a multi-minute request into a database read. Keeping it separate from `generated_report` preserves that table's immutability rule.
+- **Consequences:** Raising `REPORT_VERSION` retires stored reports without deleting them. All model calls behind one report share `REPORT_ANALYSIS_BUDGET_SECONDS`, with a structural fallback.
+- **Status:** Accepted — in effect.
+
+---
+
+## Production routes the API through the frontend host, guarded by a shared secret
+
+- **Date:** 2026-09-29
+- **Decision:** Deploy the frontend on Vercel and the backend on Render, with Vercel rewriting `/api/*` to the Render service and adding an `x-origin-secret` header. When `ORIGIN_SECRET` is set the backend rejects any request (except `/health`) without the matching header. No CORS middleware is added.
+- **Context:** The backend had no CORS support and the frontend already assumed a same-origin `/api` prefix in development. The Render URL is public.
+- **Rationale:** A same-origin proxy keeps the browser contract identical between development and production and needs no CORS policy. The shared secret stops direct calls to the Render URL that bypass the proxy, at the cost of one environment variable on each side.
+- **Consequences:** The backend hostname is fixed in `frontend/vercel.json`; `ORIGIN_SECRET` must match on Vercel and Render. This is a perimeter control, not authentication — `X-User-ID` is still trusted as sent.
+- **Status:** Accepted — in effect.
+
+---
+
+## Greetings and questions about the twin bypass retrieval, decided without a model
+
+- **Date:** 2026-10-12
+- **Decision:** `chat/intent.py` classifies each chat message with conservative regular expressions as a greeting, a question about the twin, or a document question. The first two are answered from the profile and memories through `twin_conversation`, with no sources; everything else goes through retrieval unchanged. The response carries `answer_basis`.
+- **Context:** With an empty or unrelated knowledge base, "Hi" and "Introduce yourself" returned the fixed no-match reply, and the UI showed "Nothing in the knowledge base matched" beneath them.
+- **Rationale:** A model-based classifier would put a paid, non-deterministic call in front of every question. Misclassifying a document question as conversational loses grounding, so the patterns are narrow and the default is a document question.
+- **Consequences:** Unusual phrasings fall through to retrieval. The profile is still never presented as a source, and a question about a twin with no profile gets a fixed reply rather than an invented one.
+- **Status:** Accepted — in effect.
+
+---
+
+## Every completion carries an explicit output-token cap
+
+- **Date:** 2026-10-14
+- **Decision:** `LLMService` sends `max_tokens=4096` (`MAX_OUTPUT_TOKENS`) on both the structured-output and plain completion paths.
+- **Context:** OpenRouter returned `402` errors citing oversized output reservations and `in_flight_budget_exhausted`; without a limit, each request reserves the model's full output allowance against account credit.
+- **Rationale:** 4,096 tokens comfortably covers chat answers, email drafts and report batches while bounding each reservation.
+- **Consequences:** A response that needs more will be truncated — most visibly as malformed JSON in a report batch, which falls back to structural analysis. Concurrent requests can still exhaust in-flight credit.
 - **Status:** Accepted — in effect.
 
 ---

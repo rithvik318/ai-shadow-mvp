@@ -1,111 +1,85 @@
 # AI Shadow MVP — Roadmap
 
-The MVP is one sentence: **users upload documents, the documents are indexed, users chat with them, and answers carry citations.** Everything here serves that sentence. Capabilities outside it are tracked in [`FEATURES.md`](FEATURES.md) under "explicitly out of scope".
+The MVP is one sentence: **users upload documents, the documents are indexed,
+users chat with them, and answers carry citations** — with a Digital Twin
+shaping how answers and emails are written. Where the project stands is in
+[`PROJECT_STATE.md`](PROJECT_STATE.md); what exists is in
+[`FEATURES.md`](FEATURES.md).
 
 ---
 
 ## Current phase
 
-**Phase 9 — Email Agent. Complete, pending a live mailbox.**
+**Deployed MVP — hardening.** All MVP features are built and the application is
+live (Vercel → Render → Neon). The remaining work is operational completion and
+hardening, not new features.
 
-Where things stand right now, in one page: [`PROJECT_STATE.md`](PROJECT_STATE.md).
+## Delivered
 
----
+- Document ingestion (PDF, DOCX, PPTX, XLSX, HTML, TXT, Markdown) with
+  provenance, content-hash identity, batch upload and embedding backfill.
+- Semantic retrieval over pgvector, retrieval-only search, and grounded chat with
+  source references and intent routing for greetings and twin questions.
+- Multi-user Digital Twins with profiles and typed memories.
+- OneDrive / SharePoint synchronisation with delta runs, source resolution,
+  status reporting and an optional schedule.
+- Email Agent: per-user Outlook mailbox, triage, compose and revision
+  operations, templates, drafts with attachments, approval-gated sending,
+  follow-ups.
+- Tasks with derived urgency and escalation; follow-ups converted to tasks.
+- Weekly and monthly activity reports (stored, evidence-gated, with structural
+  fallback), email digests with `.docx` download, and the weekly work view.
+- Manual calendar import and attendance recording.
+- React workspace covering every feature above.
+- Production deployment with an origin-secret perimeter.
 
-## Completed
+## Next — operational completion
 
-- Repository established as a focused MVP build, carrying forward the reusable components of the `ai-shadow` prototype and leaving its unbuilt architecture behind (see [`DECISIONS.md`](DECISIONS.md)).
-- Configuration, exception hierarchy, database layer, LLM provider abstraction, prompt system and Analysis Engine ported, with the reference repository's known issues fixed in transit: correct package `__init__.py` files, a lazily-constructed LLM client, SQL echo driven by `DEBUG`, declared test dependencies, and an `.env.example`.
-- `documents` and `document_chunks` schema with an Alembic baseline migration, the pgvector extension, a nullable embedding column and its HNSW index.
-- Document parsing for PDF, DOCX, TXT and Markdown, preserving page numbers and section headings.
-- Configurable chunking with overlap, propagating provenance onto every chunk.
-- Transactional ingestion with a visible document lifecycle (`pending → processing → indexed | failed`).
-- Document API: upload, list with filtering and pagination, retrieve, delete.
-- Domain errors mapped to specific HTTP status codes with a consistent body.
-- Test suite covering parsing, chunking, ingestion, validation and the HTTP surface.
-- Ruff configured for linting and formatting.
-- Embedding generation wired into ingestion, with batching, order-preserving vector assignment, and dimension validation against the column width.
-- Embedding provider configurable independently of the completion provider, so a provider that does not serve embeddings is an environment change rather than a code change.
-- Backfill for chunks with no vector, covering documents ingested before embeddings existed and uploads whose embedding step failed.
-- Semantic retrieval: top-k cosine search executed in the database, configurable `top_k` and similarity floor, restricted to `indexed` documents and scoped by user.
-- Dialect-aware `cosine_distance`, so the retrieval query is exercised by the SQLite suite and verified against real pgvector by an opt-in test.
-- Stateless RAG chat: `POST /chat` answers from retrieved passages through the registered `rag_answer` prompt, returning the passages the model was shown.
-- Retrieval-only search: `POST /search` returns the ranked passages with their text and no model call, so the similarity floor can be judged against real documents.
-- Frontend: a React and Tailwind chat workspace over the existing API, with document attachment in the composer, per-file upload outcomes, a knowledge-base panel, a Digital Twin panel and citation cards kept distinct from the answer.
-- OneDrive synchronization over Microsoft Graph: configurable source folders, delta-based incremental runs, in-place re-indexing of changed files, removal of deleted ones, per-file result reporting, and an optional periodic run. It calls the same ingestion service the upload endpoints do.
-- Email Agent: drafting and ten revision operations as one operation-based endpoint, user-owned templates with placeholder filling, drafts with attachments, triage and follow-up recommendations, and a provider boundary whose Outlook implementation reuses the existing Graph client. The Digital Twin supplies the voice and the existing RAG pipeline supplies the facts; neither was duplicated. Human approval is structural rather than advisory — sending refuses an unapproved draft, and editing one withdraws its approval.
-- Multi-file upload, over one ingestion service shared with the single-file path: `POST /documents/batch-upload` processes each file independently and reports a result for each, so one unreadable or unsupported file no longer decides the fate of the batch.
-- Document identity that is not the filename — a content hash, plus an optional source identifier and version. Re-offering an unchanged file is a skip rather than a duplicate, and a changed file from a known source is re-indexed in place with its old chunks removed, so replaced text stops being retrievable.
-- Multi-user Digital Twin: a `users` table, `X-User-ID` as the MVP identity mechanism, and profile, memory and chat scoped to the identified user. The company knowledge base stays shared; only the twin is private.
-- Digital Twin core: a single profile and a typed, explicitly-written memory store, both loaded into every chat above the retrieved passages and clearly separated from them — profile and memory shape tone and priorities, and only documents can be cited.
-- Knowledge-base selection and ingestion: a deterministic manifest chooses which corpus documents belong in the knowledge base and records why for every file, with no per-category limits, and a second script ingests exactly that list through the existing upload endpoint and verifies what landed. Legacy formats the parser cannot read — `.doc`, `.ppt`, `.vsd`, spreadsheets — are reported rather than quietly dropped, and are the largest remaining gap in coverage.
+Configuration and administrator actions; no code change expected.
 
----
+1. **Grant `Calendars.Read`** to the Entra application, then run
+   `POST /calendar/import` for one window to exercise the live calendar mapping.
+2. **Run a complete OneDrive resync** with the corrected sync code
+   (`POST /sync/onedrive` with `full: true`), then check
+   `GET /sync/onedrive/status` and `python -m scripts.validate_live_integration --full`.
+   Ensure production's Knowledge Base is populated.
+3. **Verify sending** with one approved draft from a test mailbox, confirming
+   `Mail.Send` consent end to end.
+4. **Delete collected report data** (`backend/report_data*/`) once the reports
+   it fed are final. It is ignored by git but holds real correspondence.
 
-## Next: Phase 10 — Hardening
+## Then — hardening
 
-First, two connections that are configuration rather than code: the OneDrive
-folders, and the mailbox. Neither needs anything built — `GET
-/sync/onedrive/status` and `GET /email/provider/status` each report exactly what
-is missing, and both features work in their unconnected state.
+In rough priority order:
 
-For OneDrive the remaining work is three commands on a machine that holds the
-tenant credentials, and none of them is a code change:
-
-1. `python -m scripts.discover_onedrive_sources --user <upn>` to get the drive id.
-2. `python -m scripts.discover_onedrive_sources --resolve` to turn the five
-   configured folder paths into `drive_id` + `item_id`, and paste the printed
-   `ONEDRIVE_SOURCES` line back into `.env`. It exits non-zero if any folder
-   could not be found, so a wrong path is caught before an embedding is paid for.
-3. `POST /sync/onedrive` with one source named, then with none, and read
-   `GET /sync/onedrive/status`.
-
-Everything downstream of that — delta handling, throttling, per-source failure
-isolation, the scheduler, the status screen and retrieval with attribution — is
-built and tested against a mock Graph. What is genuinely unknown until step 3
-runs is the shape of the real corpus: how many files, how many in formats the
-parser cannot read, and how hard the tenant throttles a first full enumeration.
-
-Then: authentication behind the `X-User-ID` identity that already exists, CI,
-background ingestion, and CORS or same-origin serving for a deployed frontend.
-
-Settle first, on real documents: the similarity floor. The whole corpus can now
-arrive automatically and be read through a UI, so this is the number most likely
-to make answers feel wrong. `POST /search` exists to judge it without paying for
-a completion, and is wrapped in the frontend API layer ready to be surfaced. The 0.0 default excludes only passages pointing the opposite way, which is permissive — it hands the model loosely related context rather than admitting there is none. Too high and the system says "I don't know" about documents it holds. Now that answers are visible, this is the single number most likely to make them feel wrong, and it can finally be judged by reading the output.
-
-`POST /search` now exists for exactly that purpose — retrieval without the model — so the floor can be moved and the effect read off directly rather than inferred from an answer.
-
----
-
-## Then
-
-**Still to surface in the UI —** a retrieval-only search view over `POST /search`, and profile and memory editing over `PUT /profile` and the memory writes. Both are wrapped in the frontend's API layer; neither has a screen. The sync status now has one, inside the Knowledge Base panel.
-
-**Still to page properly —** the inbox. `EmailProvider.list_messages` takes a count and returns a list, so "load more" re-asks for a larger page rather than continuing from where the last one stopped. That is honest at fifty and a hundred and wasteful in the hundreds, which is why `EMAIL_INBOX_MAX_PAGE_SIZE` bounds it at two hundred. A real cursor is a change to the provider contract — every implementation would have to carry one — and is worth doing only when somebody has a mailbox large enough to need it.
-
-**Still to connect —** Gmail, if it is ever wanted. `EmailProvider` is the whole contract, and the work is one module beside `outlook_provider.py` plus one entry in the registry's `_BUILDERS`. Nothing above the provider boundary changes.
-
----
+1. **Authentication** behind the existing `X-User-ID` identity (a session or
+   token replacing the trusted header; no data migration needed).
+2. **CI** running `pytest`, `ruff` and the frontend checks.
+3. **Tune `RETRIEVAL_SIMILARITY_THRESHOLD`** against the real corpus using
+   `POST /search` (default `0.0` is permissive).
+4. **Background ingestion and sync**, so large uploads and first syncs do not
+   hold a request open.
+5. **Inbox cursor paging** (a provider-contract change) once mailboxes exceed the
+   200-message page.
+6. **Sentence-level citations** via index-based citing validated by the
+   Analysis Engine.
 
 ## Deliberately deferred
 
-Autonomous agents, CRM, LangGraph and n8n — deferred entirely, including partial or exploratory versions. The calendar is now read on request (see `FEATURES.md`); everything autonomous about it — scheduling, automatic import, acting on a meeting — stays deferred.
-
-Email is built, but the autonomous half of it is not and is not planned: scheduled sends, automatic replies, background triage sweeps and anything that contacts a person without an explicit approval. The provider boundary makes those possible to add; nothing about the current design assumes they will be.
-
-The AI Orchestrator, the conversation/task memory system, and the tool architecture are all designed in the reference repository and none of them are needed for the MVP sentence above. They should not be built until something concretely requires them.
+- **Autonomous behaviour.** No scheduled or automatic sends, automatic replies,
+  background triage sweeps, automatic calendar import, or anything that
+  contacts a person without explicit approval.
+- **Reference-repository architecture** — the AI Orchestrator,
+  conversation/task memory system, tool layer and multi-agent workflows — and
+  CRM, LangGraph and n8n. Not built until something concretely requires them.
+- **Additional mail providers.** Gmail would be one module beside
+  `outlook_provider.py` plus a registry entry.
 
 ### Optical character recognition for scanned documents
 
-Deferred deliberately, and now visible rather than buried. Documents whose
-format is supported and which hold no text layer are recorded `ocr_required`
-with the tag `OCR_REQUIRED / NO_TEXT_LAYER`, so the backlog is a query rather
-than an inference — `scripts/diagnose_onedrive_corpus.py` lists them by name.
-There are 30 in the SunRadia corpus.
-
-Whatever implements this belongs behind the existing parser boundary: a
-`_parse_*` function's contract is bytes in, `ParsedSection`s out, and OCR is
-that contract with a slower implementation. It is out of scope until the
-normal retrieval pipeline is accepted, because a text layer nobody has to
-generate is the cheaper source of every answer.
+Documents in a supported format with no text layer are recorded
+`ocr_required` (tagged `OCR_REQUIRED / NO_TEXT_LAYER`), so the backlog is a
+query; `scripts/diagnose_onedrive_corpus.py` lists them by name. About 30 such
+files were found in the SunRadia corpus. Any OCR implementation belongs behind
+the existing parser boundary (bytes in, `ParsedSection`s out) and is out of
+scope until the normal retrieval pipeline is accepted.

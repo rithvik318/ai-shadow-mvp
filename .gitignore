@@ -41,3 +41,4 @@ corpus_validation_results.json
 # Activity-report extracts. Real correspondence about identifiable
 # people — never commit these, and delete them when the reports are done.
 backend/report_data/
+backend/report_data_*/

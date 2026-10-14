@@ -1,6 +1,8 @@
 # AI Shadow MVP — Features Catalog
 
-The authoritative answer to "does X exist today". Where this document and [`ARCHITECTURE.md`](ARCHITECTURE.md) disagree, this document wins. For phase sequencing see [`ROADMAP.md`](ROADMAP.md).
+The authoritative answer to "does X exist today". Where this document and [`ARCHITECTURE.md`](ARCHITECTURE.md) disagree, this document wins. Where the project stands and what has been verified live is in [`PROJECT_STATE.md`](PROJECT_STATE.md); what is next is in [`ROADMAP.md`](ROADMAP.md); open gaps are in [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
+
+Everything under **Implemented** is in the deployed application (<https://ai-shadow-mvp.vercel.app/>).
 
 ---
 
@@ -23,7 +25,7 @@ A format we recognise and deliberately refuse — `.doc`, `.xls`, `.ppt`, `.mmap
 - **Dependencies:** Document Upload & Ingestion
 
 ### Document Identity & Idempotent Ingestion
-Re-offering a file the knowledge base already holds does not duplicate it. Identity is `content_hash` — the sha256 of the uploaded bytes — optionally qualified by `source_uri`, a stable identifier for where the file came from. Filename is never an identity: two unrelated files are routinely both called `proposal.pdf`, and they stay separate. Same bytes already indexed is `unchanged`: nothing is re-parsed and nothing is re-embedded. Same `source_uri` with different bytes is `replaced`: the document is re-indexed in place, its old chunks deleted and new ones stored, so the previous text stops being retrievable. Without a `source_uri`, edited content is a new document — a plain upload carries nothing tying it to the earlier one. `content_hash` is nullable, and documents ingested before it existed carry `NULL`, which never compares equal to a digest and so is never wrongly deduplicated. `source_uri` and `source_version` are not settable through the API today; they exist for the synchronisation phase to populate.
+Re-offering a file the knowledge base already holds does not duplicate it. Identity is `content_hash` — the sha256 of the uploaded bytes — optionally qualified by `source_uri`, a stable identifier for where the file came from. Filename is never an identity: two unrelated files are routinely both called `proposal.pdf`, and they stay separate. Same bytes already indexed is `unchanged`: nothing is re-parsed and nothing is re-embedded. Same `source_uri` with different bytes is `replaced`: the document is re-indexed in place, its old chunks deleted and new ones stored, so the previous text stops being retrievable. Without a `source_uri`, edited content is a new document — a plain upload carries nothing tying it to the earlier one. `content_hash` is nullable, and documents ingested before it existed carry `NULL`, which never compares equal to a digest and so is never wrongly deduplicated. `source_uri` and `source_version` are not settable through the upload API; OneDrive synchronisation populates them.
 - **Status:** Implemented
 - **Dependencies:** Document Upload & Ingestion
 
@@ -48,7 +50,7 @@ A one-shot live call reporting the configured provider, model and returned width
 - **Dependencies:** Embedding Generation
 
 ### Semantic Retrieval
-Top-k cosine similarity search over stored chunk vectors, run in the database against the HNSW index. Configurable `top_k` and similarity floor, scoped by user, restricted to `indexed` documents, with duplicate content collapsed on a whitespace- and case-insensitive fingerprint, so the same passage under two filenames does not take two of the slots a caller asked for. Results carry document, filename, page and heading, so a citation can be resolved. Reached over HTTP through `POST /chat` and, without the model, through `POST /search`.
+Top-k cosine similarity search over stored chunk vectors, run in the database against the HNSW index. Configurable `top_k` and similarity floor, over the shared company corpus (`MVP_USER_ID`), restricted to `indexed` documents, with duplicate content collapsed on a whitespace- and case-insensitive fingerprint, so the same passage under two filenames does not take two of the slots a caller asked for. Results carry document, filename, page and heading, so a citation can be resolved. Reached over HTTP through `POST /chat` and, without the model, through `POST /search`.
 - **Status:** Implemented
 - **Dependencies:** Embedding Generation, Document Models & Migrations
 
@@ -58,7 +60,7 @@ A `cosine_distance` construct compiling to pgvector's `<=>` on Postgres and to a
 - **Dependencies:** Document Models & Migrations
 
 ### RAG Chat with Citations
-`POST /chat` answers a question using only the caller's indexed documents. Retrieval supplies the context, which is assembled into delimited `[SOURCE n]` blocks naming the document, section and page of each passage; the registered `rag_answer` prompt constrains the model to those passages and instructs it to cite them by identifier. The response carries each passage as `document`, `section`, `page` and `similarity`. Context is bounded by `CHAT_CONTEXT_MAX_CHARS` — passages dropped for budget are not reported as sources, because the model never saw them. Stateless: no conversation history is kept or consulted.
+`POST /chat` answers a question using only the shared knowledge base's indexed documents. Retrieval supplies the context, which is assembled into delimited `[SOURCE n]` blocks naming the document, section and page of each passage; the registered `rag_answer` prompt constrains the model to those passages and instructs it to cite them by identifier. The response carries each passage as `document`, `section`, `page` and `similarity`. Context is bounded by `CHAT_CONTEXT_MAX_CHARS` — passages dropped for budget are not reported as sources, because the model never saw them. Stateless: no conversation history is kept or consulted.
 
 Not every message is a document question. Before retrieval, a deterministic classifier (`chat/intent.py`) recognises greetings ("Hi", "Good morning", "Thanks") and questions to the twin about itself ("Introduce yourself", "Who are you?", "What are your priorities?"). These skip retrieval and are answered from the selected user's profile and memories through the `twin_conversation` prompt, with no sources; a question about the twin when no profile or memory exists gets a fixed reply rather than an invented one. Anything else — including a greeting followed by a real question — goes through retrieval, and a document question nothing matches still gets the fixed no-match reply without a model call. The response's `answer_basis` (`documents`, `no_match`, `conversation`, `profile`) says which happened, and the UI shows "Nothing in the knowledge base matched" only for `no_match`. Provider SDK errors raised by `LLMService` are logged by class and status (never the provider's message) and returned as 502 rather than escaping as an unhandled 500.
 - **Status:** Implemented
@@ -85,7 +87,7 @@ Who the Shadow answers for, and what it durably knows about them. One profile pe
 - **Dependencies:** Database Connectivity Layer
 
 ### Persona-Aware RAG
-`POST /chat` loads the profile and the most important active, unexpired memories and puts them above the retrieved passages, under `[DIGITAL TWIN PROFILE]` and `[MEMORY]` headings, with the passages under `[KNOWLEDGE SOURCES]`. The prompt tells the model to use them for tone, emphasis and priorities but never as evidence: only the numbered passages can be cited as `[SOURCE n]`, and `sources` in the response is still built from retrieved chunks alone. The persona block is bounded by `PERSONA_CONTEXT_MAX_CHARS` and subtracted from `CHAT_CONTEXT_MAX_CHARS` rather than added to it, so a Digital Twin cannot grow the prompt past the bound already in place. With no profile and no memories the assembled context is byte-for-byte what it was before the feature existed. The request and response contracts are unchanged.
+`POST /chat` loads the profile and the most important active, unexpired memories and puts them above the retrieved passages, under `[DIGITAL TWIN PROFILE]` and `[MEMORY]` headings, with the passages under `[KNOWLEDGE SOURCES]`. The prompt tells the model to use them for tone, emphasis and priorities but never as evidence: only the numbered passages can be cited as `[SOURCE n]`, and `sources` in the response is still built from retrieved chunks alone. The persona block is bounded by `PERSONA_CONTEXT_MAX_CHARS` and subtracted from `CHAT_CONTEXT_MAX_CHARS` rather than added to it, so a Digital Twin cannot grow the prompt past the bound already in place. With no profile and no memories the assembled context contains only the passages.
 - **Status:** Implemented
 - **Dependencies:** RAG Chat with Citations, Digital Twin Profile & Memory
 
@@ -105,13 +107,15 @@ Drafting, revising, triage and follow-up recommendations, written as the caller'
 **Follow-ups** are recommendations. `GET /email/follow-ups` lists them soonest-due first with undated ones last, and `POST /email/follow-ups/{id}/handled` is pressed by a person. A due date appears only where the message itself gave one — the prompt forbids choosing a deadline.
 
 Everything is user-scoped: templates, drafts and assessments are private, and another user's is a `404` rather than a `403`. No request body carries a `user_id`.
-- **Status:** Implemented — **no live mailbox has been connected**
+- **Status:** Implemented. Mailboxes are connected per user (`GET/PUT/DELETE /email/mailbox`); mail reading has been exercised live, sending has not been recorded live — see `PROJECT_STATE.md`
 - **Dependencies:** Multi-User Digital Twin, Persona-Aware RAG, Analysis Engine, Prompt Registry System, Microsoft Graph Client
 
-### Activity Reports
+### Email Digest Reports
+These are the stored weekly and monthly *summary* reports (`weekly_email_digest`, `monthly_email_digest`) and the source of the **Download** (`.docx`) on the Reports screen. The detailed, evidence-based analysis shown on screen is [Detailed Activity Reports](#detailed-activity-reports) below.
+
 Reports answer "what happened"; Tasks answers "what do I need to do". Keeping those apart is what the Reports section is for. Two documents — a **Weekly Activity Report** and a **Monthly Activity Report** — in eight sections: executive summary, major workstreams, important conversations, decisions and outcomes, requires follow-up, completed work, risks and issues, and the bottom line. A stored report downloads as `.docx` from `GET /reports/document`, rendered from the snapshot rather than rebuilt, so the file and the screen agree today and next month.
 
-**Nothing in a report is invented and no model writes any of it.** Every line is assembled from a count or a row: correspondents from the digest, completed and outstanding work from tasks, risks from what is more than two days late. "Major workstreams" is explicitly a grouping by correspondent rather than an inferred project list — inferring a project from a set of subject lines is a guess, and a guess in a report somebody signs is their problem. Sections with nothing in them are omitted rather than printed over the word "None". A period with no mailbox still produces a report: the task half is real, and the email half says it was unavailable.
+**Nothing in a digest report is invented and no model writes any of it.** Every line is assembled from a count or a row: correspondents from the digest, completed and outstanding work from tasks, risks from what is more than two days late. "Major workstreams" is explicitly a grouping by correspondent rather than an inferred project list — inferring a project from a set of subject lines is a guess, and a guess in a report somebody signs is their problem. Sections with nothing in them are omitted rather than printed over the word "None". A period with no mailbox still produces a report: the task half is real, and the email half says it was unavailable.
 
 The interactive weekly work view — meetings needing an answer, escalations — is still reachable as the last tab, because those are actions on live work and a snapshot has nothing to act on.
 
@@ -131,7 +135,7 @@ Three report types, one envelope, and history that does not move. `GET /reports?
 **Scheduling reuses `SyncScheduler`** — no workflow engine, no second piece of infrastructure. `REPORT_DIGEST_SCHEDULE_ENABLED` (off by default) runs a tick that asks whether each user's last *completed* week and month are recorded and records them if not. Idempotent by construction: a period already snapshotted costs one indexed lookup per user per type and no mailbox call.
 
 Stored reports are owned by their user, cascade on deletion, and are listed in the deletion preview. History filters on `user_id` unconditionally; there is no call shape that returns another person's report.
-- **Status:** Implemented — the digests have **never been generated against a live mailbox**, because no mailbox has been connected
+- **Status:** Implemented
 - **Dependencies:** Email Agent, Email Provider Abstraction, Multi-User Digital Twin, Scheduled Synchronization
 
 ### Tasks
@@ -171,8 +175,8 @@ Started work is still outstanding work: it stays overdue, stays escalated, and i
 
 A reply goes through `/messages/{id}/reply` rather than `/sendMail`, so it threads correctly. Graph's `sendMail` returns no message id, and `SendReceipt.message_id` is left `None` rather than filled with a guess. A `403` is translated into an auth error that names the likely cause — mail consent is separate from files.
 
-Configured by `EMAIL_PROVIDER=outlook` and `EMAIL_MAILBOX_ADDRESS`, reusing `ONEDRIVE_TENANT_ID`, `ONEDRIVE_CLIENT_ID` and `ONEDRIVE_CLIENT_SECRET`. That application additionally needs the `Mail.Read` and `Mail.Send` application permissions with admin consent.
-- **Status:** Implemented and unit-tested against a mock transport — **never executed against a live tenant**. Nothing in this repository establishes that a real mailbox answers as these tests assume.
+Enabled by `EMAIL_PROVIDER=outlook`, reusing `ONEDRIVE_TENANT_ID`, `ONEDRIVE_CLIENT_ID` and `ONEDRIVE_CLIENT_SECRET`. Each user's mailbox is stored in `user_mailbox` and set through `PUT /email/mailbox` (the Reports screen's mailbox form); `EMAIL_MAILBOX_ADDRESS` is used only when `EMAIL_ALLOW_SHARED_FALLBACK_MAILBOX` is set. `GET /email/provider/status` reports configured / refused / connected. The application needs the `Mail.Read` and `Mail.Send` application permissions with admin consent. A windowed listing (used by reports) selects `body` and `isDraft` and drops drafts.
+- **Status:** Implemented. Live mail reads have run against the SunRadia tenant; a live send is not recorded.
 - **Dependencies:** Email Provider Abstraction, Microsoft Graph Client
 
 ### Calendar Import (Microsoft Graph)
@@ -185,7 +189,7 @@ Real meetings, read on request and recorded without a judgement attached. `GET /
 **Idempotent with no migration.** `(user_id, provider_event_id)` has been unique on `calendar_event` since the model was written, against the day consent arrived; this is that day. A cancelled occurrence is kept and retitled rather than deleted — deleting it would silently remove a meeting somebody may already have planned around. A time in an unexpected zone is dropped rather than assumed UTC: a meeting five and a half hours from where it was looks entirely correct on screen.
 
 Refusals are refusals rather than empty results. No mailbox, or a window that is not a window, is a `503` — an empty result would be indistinguishable from a genuinely free week, and a report built on it would be claiming a calendar was read. Reuses the existing `GraphClient` and `mailbox_config_service`, so there is no second Graph authentication and no mailbox is named anywhere but a user's own row. `Calendars.Read` is a separate consent from `Files.Read.All` and `Mail.Read`, and the 403 message says so, because re-granting either of the others cannot help.
-- **Status:** Implemented and unit-tested against a mock transport — **never executed against a live tenant.** Nothing here establishes that a real calendar answers as these tests assume.
+- **Status:** Implemented and unit-tested against a mock transport. Not yet exercised live: `Calendars.Read` has not been granted (Graph returns `403`).
 - **Dependencies:** Microsoft Graph Client, Email Provider Abstraction, Multi-User Digital Twin
 
 ### Document Management API
@@ -214,40 +218,28 @@ SQLAlchemy engine, session factory, and a FastAPI session dependency. SQL echo f
 - **Dependencies:** None
 
 ### LLM Provider Abstraction
-Provider-agnostic chat completions and embeddings across OpenAI and OpenRouter, selected by configuration and cached per provider. Clients are constructed lazily on first use, so importing the package requires no credentials.
-- **Status:** Implemented — both paths now have callers
+Provider-agnostic chat completions and embeddings across OpenAI and OpenRouter, selected by configuration and cached per provider. Clients are constructed lazily on first use, so importing the package requires no credentials. Every client carries `LLM_TIMEOUT_SECONDS` and `LLM_MAX_RETRIES`; every completion sends `max_tokens=4096` (`MAX_OUTPUT_TOKENS`) to bound OpenRouter's per-request reservation; SDK errors become `LLMServiceError` (502), logged by class and status only. Structured output is requested with OpenRouter's `require_parameters` and retried without it on a 400/404.
+- **Status:** Implemented
 - **Dependencies:** None
 
 ### Prompt Registry System
-`PromptTemplate`, `PromptRegistry` and `PromptBuilder`, with seven built-in prompts: `rag_answer` used by chat; `email_compose`, `email_transform`, `email_subject`, `email_triage` and `email_thread_summary` used by the Email Agent; and `assistant`, which still has no caller.
+`PromptTemplate`, `PromptRegistry` and `PromptBuilder`, with eleven built-in prompts: `rag_answer` and `twin_conversation` used by chat; `email_compose`, `email_transform`, `email_subject`, `email_triage` and `email_thread_summary` used by the Email Agent; `report_thread_analysis`, `report_period_synthesis` and `report_cross_period` used by detailed activity reports; and `assistant`, which has no caller.
 - **Status:** Implemented
 - **Dependencies:** None
 
 ### Analysis Engine
-Runs a registered prompt, calls the LLM, tolerates markdown-fenced JSON, and validates the result against a caller-supplied Pydantic model.
-- **Status:** Implemented — used by every Email Agent operation
+Runs a registered prompt, calls the LLM, tolerates markdown-fenced JSON and prose-wrapped objects, distinguishes an empty response from malformed JSON, and validates the result against a caller-supplied Pydantic model.
+- **Status:** Implemented — used by every Email Agent operation and by detailed activity reports
 - **Dependencies:** Prompt Registry System, LLM Provider Abstraction
 
 ### Health & Root Endpoints
-`GET /health`, `GET /`.
+`GET /health` returns `{"status": "healthy"}` and is used by Render's health check; `GET /` returns the application name.
 - **Status:** Implemented
 
-> **The Analysis Engine now has callers.** Every Email Agent operation runs through it: composing and revising return validated `{subject, body}`, and triage returns a validated category, priority and action list. The previously recorded "carried without a caller" exception is closed. Chat still derives its sources from retrieval rather than from validated model output — see the RAG Chat decision in `DECISIONS.md` — so it remains the one path that does not use the engine.
-
----
-
-## In Progress
-
-None. See [`ROADMAP.md`](ROADMAP.md).
-
----
-
-## Planned
-
-### Sentence-Level Citations
-Attribution of individual claims to specific passages, by having the model cite by index and validating those indices through the Analysis Engine. Today every retrieved passage is returned as a source, including any the model did not use.
-- **Status:** Planned
-- **Dependencies:** RAG Chat, Analysis Engine
+### Proxy Origin Check
+When `ORIGIN_SECRET` is set, every path except `/health` requires a matching `x-origin-secret` header (constant-time comparison) and otherwise returns `403 OriginNotAllowed`; neither value is logged. Vercel's `/api` rewrite adds the header, so the Render URL cannot be called directly. Unset locally. This is a perimeter check, not authentication.
+- **Status:** Implemented
+- **Dependencies:** Configuration Management
 
 ### OneDrive Synchronization
 Keeps the knowledge base in step with configured OneDrive folders, over Microsoft Graph. Folders come from `ONEDRIVE_SOURCES` — a JSON array of `{key, label?, drive_id? | user?, path | item_id | share_url, uri?, enabled?}` — so adding one is a configuration change; no folder is named in code. `enabled: false` pauses a source without deleting it: the delta token is stored against the key, so re-enabling resumes rather than re-indexing the folder, and a disabled source is still reported by the status endpoint because "switched off" is information and a vanished row reads as a mistake. Each file is downloaded to a temporary path, passed to the same ingestion service the upload endpoints use, and the staged copy is removed whether ingestion succeeded or not. OneDrive is never mirrored locally.
@@ -297,31 +289,14 @@ An asyncio task started from the application lifespan when `ONEDRIVE_SYNC_ENABLE
 - **Dependencies:** OneDrive Synchronization
 
 ### Frontend
-A chat workspace in React, Tailwind and Vite, under `frontend/`. The conversation is the primary surface; documents are attached from the composer rather than from a separate screen, so uploading is part of asking rather than a detour. Multi-file selection goes through `POST /documents/batch-upload`, and each file's outcome is shown distinctly — `indexed`, `unchanged`, `replaced`, `unsupported`, `ocr_required`, `failed` — because the ingestion layer distinguishes them and collapsing them would hide idempotency working. Retrieved passages render as source cards beneath the answer, separate from it; the persona note says profile and memory shape the wording and are never cited, matching what the backend actually builds `sources` from. A knowledge-base panel lists, filters and deletes documents; a Digital Twin panel reads the selected user's profile and memories. The user selector sends `X-User-ID` and is labelled as identity rather than sign-in.
+A React, TypeScript, Tailwind and Vite workspace under `frontend/` with six screens: **Chat** (conversations kept in browser `localStorage`, document attachment, source cards, the no-match note only for `answer_basis = no_match`), **Digital Twins** (create, activate, delete with preview; Profile, Preferences and Memories tabs), **Knowledge Base** (corpus statistics, OneDrive source status and manual sync, upload, document list), **Email Agent** (Inbox, Compose, Templates, Drafts, Follow-ups), **Tasks** and **Reports** (Weekly/Monthly Activity Report, mailbox connection, `.docx` download, and the weekly work view). The selected twin is sent as `X-User-ID`; shared-corpus calls send no identity.
 
-All API access goes through one client layer whose types mirror `backend/app/schemas/`. Development proxies `/api` to the backend, since no CORS middleware exists; production expects the built files to be served same-origin.
+All API access goes through one client layer (`src/api/`) whose types mirror `backend/app/schemas/`. The base URL is `VITE_API_BASE_URL` (default `/api`). There is no CORS middleware: development proxies `/api` through Vite (`VITE_BACKEND_ORIGIN`), and production proxies it through Vercel's rewrite to the Render backend.
 - **Status:** Implemented
-- **Dependencies:** RAG Chat with Citations, Multi-File Upload, Multi-User Digital Twin
+- **Dependencies:** RAG Chat with Citations, Multi-File Upload, Multi-User Digital Twin, Email Agent
 
-### Authentication
-Verifying that a caller is who `X-User-ID` says they are. Multi-user data isolation already exists for the Digital Twin, so this is a change to where the identity comes from — a session or token replacing a trusted header — not a migration or a backfill.
-- **Status:** Planned
-- **Dependencies:** Multi-User Digital Twin
-
-### Background Ingestion
-Move ingestion off the request thread once documents are large enough for synchronous processing to be a problem.
-- **Status:** Planned
-- **Dependencies:** Document Upload & Ingestion
-
----
-
-## Explicitly out of scope for the MVP
-
-Autonomous agents, CRM, LangGraph and n8n are deferred entirely. **Email and the calendar are no longer deferred** — see the Email Agent and Calendar Import above — but everything autonomous about both still is: nothing schedules a send or an import, nothing contacts anybody without a person approving it, nothing acts on a meeting, and no model can reach a provider.
-
-Carried over from the reference repository's design but deliberately not built here: the AI Orchestrator, conversation/user/task memory, the tool architecture (email, calendar, research, search), document generation, and multi-agent workflows.
-
-### Activity reports — evidence-based, weekly / monthly / month-to-date
+### Detailed Activity Reports
+The Weekly and Monthly Activity Report tabs on the Reports screen.
 
 `GET /reports/activity?start=&end=` produces a detailed management activity report for any window. Omitting both dates reports the current month so far. The report is built from correspondence, not from counts: a six-stage pipeline under `app/services/features/reports/` collects whole messages with their bodies and conversation ids (`correspondence.py`), separates automated and bulk mail from substantive correspondence deterministically (`classification.py`), rebuilds conversations and derives who spoke last and whether the owner replied (`threads.py`), asks a model what those conversations were about and what they mean (`analysis.py`), renders the fourteen-section document (`composition.py`) and checks it against the evidence volume behind it (`quality.py`). `pipeline.py` is the single entry point. Both directions of the mailbox are read through `EmailProvider.list_messages` — the inbox, and then the sent folder, each bounded by `since`/`until` so a report reads the period it is about rather than the newest page of a mailbox — because a report that cannot see the owner's replies cannot say what they did; a listing that does not reach back past the start of the period is reported as truncated in the header rather than presented as the whole window. Whether a model is used is answered by `llm_client.llm_configured()`, which reads the credential belonging to the provider `LLM_PROVIDER` names.
 
@@ -346,3 +321,38 @@ Tasks are supplementary: they are passed to the analysis stage as context with e
 **One request is bounded, and says what it spent.** Every model call is bounded by `LLM_TIMEOUT_SECONDS` and `LLM_MAX_RETRIES`, and all the calls behind one report share `REPORT_ANALYSIS_BUDGET_SECONDS`. When that budget is spent the remaining conversations are described structurally and the header says so. The per-conversation analysis runs once per period and is reused by each week inside it, so a month costs one pass over its threads rather than two. The pipeline logs its period, message count, per-batch outcome and elapsed time — counts and identifiers only, never a subject, a body or an address — and `scripts/diagnose_activity_report.py` reruns one report against the live configuration and prints every model call with its exception.
 
 Quality control is evidence-volume-aware rather than a fixed word count. A quiet period legitimately produces a short report; a period with a hundred substantive conversations producing five bullets is a failure, and triggers one fuller re-composition pass.
+- **Status:** Implemented
+- **Dependencies:** Email Agent, Outlook Provider, Analysis Engine, Prompt Registry System
+
+---
+
+## In Progress
+
+None. See [`ROADMAP.md`](ROADMAP.md).
+
+---
+
+## Planned
+
+### Sentence-Level Citations
+Attribution of individual claims to specific passages, by having the model cite by index and validating those indices through the Analysis Engine. Today every retrieved passage is returned as a source, including any the model did not use.
+- **Status:** Planned
+- **Dependencies:** RAG Chat, Analysis Engine
+
+### Authentication
+Verifying that a caller is who `X-User-ID` says they are. Multi-user data isolation already exists for the Digital Twin, so this is a change to where the identity comes from — a session or token replacing a trusted header — not a migration or a backfill.
+- **Status:** Planned
+- **Dependencies:** Multi-User Digital Twin
+
+### Background Ingestion
+Move ingestion off the request thread once documents are large enough for synchronous processing to be a problem.
+- **Status:** Planned
+- **Dependencies:** Document Upload & Ingestion
+
+---
+
+## Explicitly out of scope for the MVP
+
+Autonomous agents, CRM, LangGraph and n8n are deferred entirely. **Email and the calendar are no longer deferred** — see the Email Agent and Calendar Import above — but everything autonomous about both still is: nothing schedules a send or an import, nothing contacts anybody without a person approving it, nothing acts on a meeting, and no model can reach a provider.
+
+Carried over from the reference repository's design but deliberately not built here: the AI Orchestrator, conversation/user/task memory, the tool architecture (email, calendar, research, search), document generation, and multi-agent workflows.
