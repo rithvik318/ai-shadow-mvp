@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.llm import client as client_module
-from app.services.llm.llm_service import llm_service
+from app.services.llm.llm_service import MAX_OUTPUT_TOKENS, llm_service
 
 
 @pytest.fixture(autouse=True)
@@ -21,9 +21,10 @@ def test_complete_sends_messages_and_returns_content(
 
     captured: dict[str, object] = {}
 
-    def fake_create(*, model: str, messages: list) -> SimpleNamespace:
+    def fake_create(*, model: str, messages: list, max_tokens: int) -> SimpleNamespace:
         captured["model"] = model
         captured["messages"] = messages
+        captured["max_tokens"] = max_tokens
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content="the reply"))]
         )
@@ -41,6 +42,8 @@ def test_complete_sends_messages_and_returns_content(
 
     assert result == "the reply"
     assert captured["messages"] == messages
+    # Bounds OpenRouter's per-request output reservation (402 in-flight budget).
+    assert captured["max_tokens"] == MAX_OUTPUT_TOKENS == 4096
 
 
 def test_complete_returns_empty_string_when_content_is_null(
@@ -115,6 +118,7 @@ def test_structured_output_is_requested_with_openrouter_routing(
 
     assert calls[0]["response_format"] == schema
     assert calls[0]["extra_body"] == {"provider": {"require_parameters": True}}
+    assert calls[0]["max_tokens"] == 4096
 
 
 def test_a_provider_that_refuses_structured_output_gets_the_plain_request(
@@ -136,3 +140,5 @@ def test_a_provider_that_refuses_structured_output_gets_the_plain_request(
     assert result == "{}"
     assert len(calls) == 2
     assert "response_format" not in calls[1]
+    assert calls[0]["max_tokens"] == 4096
+    assert calls[1]["max_tokens"] == 4096

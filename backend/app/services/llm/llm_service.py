@@ -10,6 +10,12 @@ from app.services.llm.client import get_llm_client, structured_output_options
 
 logger = logging.getLogger(__name__)
 
+# An explicit output ceiling on every completion. Without one, OpenRouter
+# reserves the model's full output allowance against the account's credit for
+# each in-flight request, which is what its 402 "in_flight_budget_exhausted"
+# errors were reporting.
+MAX_OUTPUT_TOKENS = 4096
+
 
 class LLMService:
     """Provider-agnostic access to chat completions.
@@ -66,6 +72,7 @@ class LLMService:
                     model=settings.LLM_MODEL,
                     messages=messages,
                     response_format=response_format,
+                    max_tokens=MAX_OUTPUT_TOKENS,
                     **structured_output_options(),
                 )
 
@@ -80,6 +87,7 @@ class LLMService:
         response = client.chat.completions.create(
             model=settings.LLM_MODEL,
             messages=messages,
+            max_tokens=MAX_OUTPUT_TOKENS,
         )
 
         return response.choices[0].message.content or ""
